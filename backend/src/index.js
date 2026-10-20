@@ -7,6 +7,7 @@ import authRoutes from './auth.js';
 import marketRoutes from './routes/market.js';
 import tradeRoutes from './routes/trade.js';
 import leaderboardRoutes from './routes/leaderboard.js';
+import equityRoutes from './routes/equity.js';
 import { loadMarket, startMarket, setBroadcaster, getSnapshot } from './market.js';
 import { seedStocks } from './seed.js';
 import { ensureSnapshotTable, startSnapshots } from './snapshots.js';
@@ -26,6 +27,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api', marketRoutes);
 app.use('/api', tradeRoutes);
 app.use('/api', leaderboardRoutes);
+app.use('/api', equityRoutes);
 
 // 兜底中间件必须放在所有路由之后：记录 404 与未捕获异常
 app.use(notFoundHandler);

@@ -70,6 +70,25 @@ export interface User {
   createdAt: string;
 }
 
+export interface EquityPoint {
+  date: string;
+  cash: number;
+  marketValue: number;
+  totalAssets: number;
+  profit: number;
+  returnPct: number;
+}
+
+export interface EquityResponse {
+  initialCapital: number;
+  days: number;
+  gran: 'day' | 'minute';
+  range: { from: string; to: string };
+  accounts: { cash: number; marketValue: number; totalAssets: number };
+  summary: { profit: number; returnPct: number; maxDrawdown: number; peak: number };
+  series: EquityPoint[];
+}
+
 export interface MarketSummary {
   up: number;
   down: number;
