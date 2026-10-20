@@ -61,14 +61,20 @@
 # 1. 克隆/进入项目目录
 cd mm8888
 
-# 2.（可选）设置 JWT 密钥
+# 2. 先在宿主机安装依赖并构建前端
+#    （两个 Dockerfile 采用「COPY 本机产物」的离线构建方案，构建期不联网；
+#      node_modules 与 dist 已在 .gitignore 中排除，故 clone 后需本地生成一次）
+cd backend  && npm install && cd ..
+cd frontend && npm install && npm run build && cd ..
+
+# 3.（可选）设置 JWT 密钥
 cp .env.example .env
 # 编辑 .env 修改 JWT_SECRET
 
-# 3. 一键构建并启动
+# 4. 一键构建并启动
 docker compose up -d --build
 
-# 4. 查看状态
+# 5. 查看状态
 docker compose ps
 ```
 
