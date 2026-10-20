@@ -1,0 +1,62 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+    'Helvetica Neue', Helvetica, Arial, sans-serif;
+  background: #f5faf9;
+}
+
+/* 涨跌沿用 A 股习惯“红涨绿跌”，仅用于数字，色调调柔以贴合清新风格 */
+.up {
+  color: #e0584f;
+}
+
+.down {
+  color: #2fa06a;
+}
+
+.flat {
+  color: #8c8c8c;
+}
+
+.logo {
+  height: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 1px;
+  background: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%);
+}
+
+.logo-main {
+  font-size: 15px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.logo-sub {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: 3px;
+  opacity: 0.82;
+  white-space: nowrap;
+}
+
+.money {
+  font-variant-numeric: tabular-nums;
+  font-family: 'DIN Alternate', 'Segoe UI', sans-serif;
+}

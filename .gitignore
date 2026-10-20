@@ -1,0 +1,32 @@
+# 依赖
+node_modules/
+**/node_modules/
+
+# 构建产物
+dist/
+build/
+**/dist/
+
+# 日志
+logs/
+*.log
+backend/logs/
+
+# 环境变量（保留 .env.example）
+.env
+.env.local
+*.env
+!.env.example
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地工作数据
+.workbuddy/
+pgdata/
+
+# 已生成的文档产物
+docs/*.xlsx

@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: papertrade
+      POSTGRES_PASSWORD: papertrade
+      POSTGRES_DB: papertrade
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U papertrade -d papertrade"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://papertrade:papertrade@db:5432/papertrade
+      JWT_SECRET: ${JWT_SECRET:-please-change-this-secret}
+      PORT: 3001
+      TICK_MS: 2000
+      SNAPSHOT_MS: 60000
+      TZ: Asia/Shanghai
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_DIR: /app/logs
+    volumes:
+      - ./backend/logs:/app/logs
+    expose:
+      - "3001"
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:
