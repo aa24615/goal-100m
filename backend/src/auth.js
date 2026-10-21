@@ -164,7 +164,7 @@ router.post(
     const hash = await bcrypt.hash(password, 10);
     try {
       const { rows } = await pool.query(
-        'INSERT INTO users (username, email, password_hash, cash, initial_capital) VALUES ($1, $2, $3, $4, $4) RETURNING id, username, email, cash',
+        'INSERT INTO users (username, email, password_hash, cash, initial_capital) VALUES ($1, $2, $3, $4, $4) RETURNING id, username, email, cash, initial_capital',
         [u, em, hash, INITIAL_CAPITAL]
       );
       const user = rows[0];
