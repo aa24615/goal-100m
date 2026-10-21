@@ -1,5 +1,5 @@
 import pool from './db.js';
-import { getDetail } from './market.js';
+import { getDetail, getSummary } from './market.js';
 import { logger } from './logger.js';
 
 /**
@@ -25,6 +25,26 @@ export async function ensureSnapshotTable() {
   );
   // 保留略长于一年，够年榜取基准，同时避免表无限增长
   await pool.query("DELETE FROM asset_snapshots WHERE created_at < now() - interval '400 days'");
+
+  // 大盘指数快照：与用户净值同口径，用于计算「超越大盘」的超额收益
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS index_snapshots (
+      id          BIGSERIAL PRIMARY KEY,
+      index_value NUMERIC(18,4) NOT NULL,
+      index_pct   NUMERIC(12,4) NOT NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query("DELETE FROM index_snapshots WHERE created_at < now() - interval '400 days'");
+}
+
+/** 记录一次大盘指数快照（与用户资产快照同频） */
+export async function snapshotIndex() {
+  const s = getSummary();
+  await pool.query('INSERT INTO index_snapshots (index_value, index_pct) VALUES ($1, $2)', [
+    s.indexValue,
+    s.indexPct,
+  ]);
 }
 
 async function totalAssetsOf(user) {
@@ -74,6 +94,7 @@ export function startSnapshots() {
   const run = async () => {
     try {
       const n = await snapshotAll();
+      await snapshotIndex();
       if (n > 0) logger.debug('资产快照已记录', { users: n });
     } catch (e) {
       logger.error('资产快照写入失败', { err: e });

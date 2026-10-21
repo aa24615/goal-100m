@@ -20,6 +20,7 @@ export interface Holding {
   code: string;
   name: string;
   quantity: number;
+  availableQty: number;
   avgCost: number;
   price: number;
   marketValue: number;
@@ -58,6 +59,8 @@ export interface LeaderRow {
   totalAssets: number;
   baseAssets: number;
   returnPct: number;
+  excessPct: number;
+  tradeCount: number;
   rank: number;
 }
 
@@ -87,6 +90,19 @@ export interface EquityResponse {
   accounts: { cash: number; marketValue: number; totalAssets: number };
   summary: { profit: number; returnPct: number; maxDrawdown: number; peak: number };
   series: EquityPoint[];
+}
+
+export interface Order {
+  id: number;
+  code: string;
+  name: string;
+  side: 'BUY' | 'SELL';
+  limitPrice: number;
+  quantity: number;
+  status: 'PENDING' | 'FILLED' | 'CANCELLED';
+  filledPrice: number | null;
+  note: string | null;
+  createdAt: string;
 }
 
 export interface MarketSummary {

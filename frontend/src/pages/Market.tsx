@@ -3,23 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { Table, Input, Select, Tag, Button, Space, Card, Statistic, Row, Col, Empty } from 'antd';
 import { StarOutlined, StarFilled, SearchOutlined } from '@ant-design/icons';
 import { subscribe } from '../ws';
+import { useWatchlist } from '../useWatchlist';
 import type { StockQuote } from '../types';
 import { formatNum, formatPct, changeClass, formatMoney } from '../utils';
 
-function getWatchlist(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem('pt_watchlist') || '[]');
-  } catch {
-    return [];
-  }
-}
-
 export default function Market() {
   const navigate = useNavigate();
+  const { watch, toggle } = useWatchlist();
   const [quotes, setQuotes] = useState<StockQuote[]>([]);
   const [keyword, setKeyword] = useState('');
   const [sector, setSector] = useState<string>('全部');
-  const [watch, setWatch] = useState<string[]>(getWatchlist());
 
   useEffect(() => {
     return subscribe(setQuotes);
@@ -53,14 +46,7 @@ export default function Market() {
     return { up, down, flat, indexValue: idx / total, indexPct: base ? ((idx - base) / base) * 100 : 0 };
   }, [quotes]);
 
-  const toggleWatch = (code: string) => {
-    const set = new Set(watch);
-    if (set.has(code)) set.delete(code);
-    else set.add(code);
-    const arr = Array.from(set);
-    setWatch(arr);
-    localStorage.setItem('pt_watchlist', JSON.stringify(arr));
-  };
+  // 自选股读写走后端接口（useWatchlist 内已做本地兜底）
 
   const columns = [
     {
@@ -117,7 +103,7 @@ export default function Market() {
           icon={watch.includes(r.code) ? <StarFilled style={{ color: '#faad14' }} /> : <StarOutlined />}
           onClick={(e) => {
             e.stopPropagation();
-            toggleWatch(r.code);
+            toggle(r.code);
           }}
         />
       ),
@@ -126,27 +112,33 @@ export default function Market() {
 
   return (
     <div>
-      <Row gutter={16} style={{ marginBottom: 16 }}>
+      <Row gutter={16} align="stretch" style={{ marginBottom: 16 }}>
         <Col span={6}>
-          <Card>
-            <Statistic title="模拟大盘" value={formatNum(summary.indexValue)} precision={2} />
-            <div className={changeClass(summary.indexPct)} style={{ marginTop: 4 }}>
-              {formatPct(summary.indexPct)}
-            </div>
+          <Card style={{ height: '100%' }}>
+            <Statistic
+              title="模拟大盘"
+              value={formatNum(summary.indexValue)}
+              precision={2}
+              suffix={
+                <span className={changeClass(summary.indexPct)} style={{ fontSize: 13, marginLeft: 6 }}>
+                  {formatPct(summary.indexPct)}
+                </span>
+              }
+            />
           </Card>
         </Col>
         <Col span={6}>
-          <Card>
+          <Card style={{ height: '100%' }}>
             <Statistic title="上涨" value={summary.up} valueStyle={{ color: '#e0584f' }} />
           </Card>
         </Col>
         <Col span={6}>
-          <Card>
+          <Card style={{ height: '100%' }}>
             <Statistic title="下跌" value={summary.down} valueStyle={{ color: '#2fa06a' }} />
           </Card>
         </Col>
         <Col span={6}>
-          <Card>
+          <Card style={{ height: '100%' }}>
             <Statistic title="平盘" value={summary.flat} valueStyle={{ color: '#8c8c8c' }} />
           </Card>
         </Col>

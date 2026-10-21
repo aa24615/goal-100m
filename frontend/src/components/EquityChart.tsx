@@ -27,7 +27,8 @@ export default function EquityChart({
       axisLine: { lineStyle: { color: '#d9d9d9' } },
       axisLabel: {
         color: '#8c8c8c',
-        formatter: (v: string) => (v.length > 10 ? v.slice(6) : v.slice(5)),
+        // 分时标签形如「2026-10-21 01:10」取时间部分，日线标签形如「2026-10-21」取月日
+        formatter: (v: string) => (v.includes(' ') ? v.split(' ')[1] : v.slice(5)),
       },
     };
     const valueAxis = {

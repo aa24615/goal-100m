@@ -6,6 +6,7 @@ import path from 'node:path';
  * - 分级：debug / info / warn / error
  * - 输出：logs/app-YYYY-MM-DD.log（全量）+ logs/error-YYYY-MM-DD.log（仅错误）
  * - 格式：每行一个 JSON（便于检索与采集），控制台同步输出彩色可读格式
+ * - 时间：ts 为 UTC ISO，tsLocal 为与日志文件名同日的可读本地时间（避免跨日错位）
  * - 轮转：按天切分 + 单文件超过阈值自动 .1/.2 轮转 + 过期文件清理
  */
 
@@ -20,7 +21,8 @@ fs.mkdirSync(LOG_DIR, { recursive: true });
 
 const COLORS = { DEBUG: '\x1b[36m', INFO: '\x1b[32m', WARN: '\x1b[33m', ERROR: '\x1b[31m' };
 const RESET = '\x1b[0m';
-const SKIP_KEYS = new Set(['ts', 'level', 'msg']);
+// ts/tsLocal/level/msg 属于日志骨架字段：tsLocal 不重复进控制台 meta（行首 stamp 已是本地时间）
+const SKIP_KEYS = new Set(['ts', 'tsLocal', 'level', 'msg']);
 
 function pad(n, w = 2) {
   return String(n).padStart(w, '0');
@@ -32,6 +34,22 @@ function dayKey(d = new Date()) {
 
 function stamp(d = new Date()) {
   return `${dayKey(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+}
+
+// 形如 +08:00 的时区偏移，避免出现「文件名按本地日、内容 ts 按 UTC」的跨日错位
+function tzOffset(d = new Date()) {
+  const off = -d.getTimezoneOffset(); // 分钟，东八区为 480
+  const sign = off >= 0 ? '+' : '-';
+  const abs = Math.abs(off);
+  return `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
+// 带本地偏移的可读时间，与日志文件按天切分所用日期保持一致
+function localIso(d = new Date()) {
+  return `${dayKey(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(
+    d.getMilliseconds(),
+    3
+  )}${tzOffset(d)}`;
 }
 
 function filePath(base) {
@@ -112,7 +130,9 @@ function emit(level, msg, meta) {
   const num = LEVELS[level] ?? LEVELS.info;
   if (num < MIN_LEVEL) return;
 
-  const entry = { ts: new Date().toISOString(), level: level.toUpperCase(), msg };
+  const now = new Date();
+  // ts 保留 UTC ISO（机器友好、可直接排序比较），tsLocal 与文件名/控制台同一时区（人眼友好）
+  const entry = { ts: now.toISOString(), tsLocal: localIso(now), level: level.toUpperCase(), msg };
   if (meta && typeof meta === 'object') {
     for (const [k, v] of Object.entries(meta)) {
       if (v === undefined || v === null) continue;
@@ -126,7 +146,7 @@ function emit(level, msg, meta) {
 
   const extra = Object.keys(entry).filter((k) => !SKIP_KEYS.has(k));
   const suffix = extra.length
-    ? ` ${JSON.stringify(Object.fromEntries(extra.map((k) => [k, entry[k]])))}}`
+    ? ` ${JSON.stringify(Object.fromEntries(extra.map((k) => [k, entry[k]])))}`
     : '';
   console.log(`${stamp()} ${COLORS[entry.level] || ''}[${entry.level}]${RESET} ${msg}${suffix}`);
 }
@@ -139,6 +159,13 @@ export const logger = {
   dir: LOG_DIR,
 };
 
+const shutdownHooks = [];
+
+/** 注册优雅关闭钩子（关闭连接、释放定时器与连接池） */
+export function onShutdown(fn) {
+  shutdownHooks.push(fn);
+}
+
 export function installProcessGuards() {
   // 未捕获异常：记录后退出，交由容器 restart 策略自动拉起
   process.on('uncaughtException', (err) => {
@@ -150,8 +177,15 @@ export function installProcessGuards() {
     logger.error('未处理的 Promise 拒绝(unhandledRejection)', { err: reason });
   });
   for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => {
-      logger.info(`收到 ${sig} 信号，服务准备退出`);
+    process.on(sig, async () => {
+      logger.info(`收到 ${sig} 信号，开始优雅关闭`);
+      for (const fn of shutdownHooks) {
+        try {
+          await fn();
+        } catch (e) {
+          logger.error('关闭钩子执行失败', { err: e });
+        }
+      }
       process.exit(0);
     });
   }

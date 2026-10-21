@@ -4,27 +4,20 @@ import { Card, Descriptions, Button, Space, Spin, Tag, App, Empty } from 'antd';
 import { ArrowLeftOutlined, StarOutlined, StarFilled } from '@ant-design/icons';
 import api from '../api';
 import { subscribe } from '../ws';
+import { useWatchlist } from '../useWatchlist';
 import StockChart from '../components/StockChart';
 import TradePanel from '../components/TradePanel';
 import type { StockDetail as Detail, StockQuote } from '../types';
 import { formatNum, formatPct, changeClass, formatMoney } from '../utils';
 
-function getWatchlist(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem('pt_watchlist') || '[]');
-  } catch {
-    return [];
-  }
-}
-
 export default function StockDetail() {
   const { code = '' } = useParams();
   const navigate = useNavigate();
   const { message } = App.useApp();
+  const { watch, toggle } = useWatchlist();
   const [detail, setDetail] = useState<Detail | null>(null);
   const [history, setHistory] = useState<{ t: number; p: number }[]>([]);
   const [live, setLive] = useState<StockQuote | undefined>(undefined);
-  const [watch, setWatch] = useState<string[]>(getWatchlist());
   const [loading, setLoading] = useState(true);
 
   const c = code.toUpperCase();
@@ -51,27 +44,21 @@ export default function StockDetail() {
   }, [c, message]);
 
   useEffect(() => {
-    return subscribe((quotes) => {
+    return subscribe((quotes, tickTime) => {
       const q = quotes.find((x) => x.code === c);
       if (q) {
         setLive(q);
+        // 与服务端 MAX_HISTORY(240) 保持一致，且统一使用服务端 tick 时间
         setHistory((h) => {
-          const next = [...h, { t: Date.now(), p: q.price }];
-          if (next.length > 300) next.shift();
+          const next = [...h, { t: tickTime ?? Date.now(), p: q.price }];
+          if (next.length > 240) next.shift();
           return next;
         });
       }
     });
   }, [c]);
 
-  const toggleWatch = () => {
-    const set = new Set(watch);
-    if (set.has(c)) set.delete(c);
-    else set.add(c);
-    const arr = Array.from(set);
-    setWatch(arr);
-    localStorage.setItem('pt_watchlist', JSON.stringify(arr));
-  };
+  // 自选股读写走后端接口（useWatchlist 内已做本地兜底）
 
   if (loading && !detail) {
     return (
@@ -105,7 +92,7 @@ export default function StockDetail() {
         <Button
           type="text"
           icon={watch.includes(c) ? <StarFilled style={{ color: '#faad14' }} /> : <StarOutlined />}
-          onClick={toggleWatch}
+          onClick={() => toggle(c)}
         >
           {watch.includes(c) ? '已加自选' : '加自选'}
         </Button>

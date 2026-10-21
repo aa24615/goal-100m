@@ -3,20 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { Card, Table, Select, Button, Empty, Tag, Space } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import { subscribe } from '../ws';
+import { useWatchlist } from '../useWatchlist';
 import type { StockQuote } from '../types';
 import { formatNum, formatPct, changeClass } from '../utils';
 
-function getWatchlist(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem('pt_watchlist') || '[]');
-  } catch {
-    return [];
-  }
-}
-
 export default function Watchlist() {
   const navigate = useNavigate();
-  const [watch, setWatch] = useState<string[]>(getWatchlist());
+  const { watch, add, remove } = useWatchlist();
   const [quotes, setQuotes] = useState<StockQuote[]>([]);
 
   useEffect(() => {
@@ -33,20 +26,7 @@ export default function Watchlist() {
     [quotes]
   );
 
-  const add = (code: string) => {
-    if (!code) return;
-    const set = new Set(watch);
-    set.add(code);
-    const arr = Array.from(set);
-    setWatch(arr);
-    localStorage.setItem('pt_watchlist', JSON.stringify(arr));
-  };
-
-  const remove = (code: string) => {
-    const arr = watch.filter((c) => c !== code);
-    setWatch(arr);
-    localStorage.setItem('pt_watchlist', JSON.stringify(arr));
-  };
+  // 自选股读写走后端接口（useWatchlist 内已做本地兜底）
 
   const columns = [
     { title: '代码', dataIndex: 'code', render: (v: string) => <span className="money">{v}</span> },

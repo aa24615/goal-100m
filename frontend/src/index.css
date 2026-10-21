@@ -30,7 +30,7 @@ body {
 }
 
 .logo {
-  height: 56px;
+  height: 64px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -59,4 +59,42 @@ body {
 .money {
   font-variant-numeric: tabular-nums;
   font-family: 'DIN Alternate', 'Segoe UI', sans-serif;
+}
+
+/* 标签页栏：紧贴顶栏之下，与顶栏连成一体，不再单独成框 */
+.tabbar {
+  background: #fff;
+  padding: 0 16px;
+  border-bottom: 1px solid #eef4f3;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.03);
+}
+
+/* 页面内容卡片：统一的白底圆角容器 */
+.page-card {
+  background: #fff;
+  border-radius: 10px;
+  padding: 16px;
+  min-height: calc(100vh - 64px - 46px - 32px);
+}
+
+/* 登录/注册落地页页脚 */
+.auth-footer {
+  margin-top: 28px;
+  text-align: center;
+  color: #5f807d;
+  font-size: 12px;
+  line-height: 1.9;
+}
+
+.auth-footer a {
+  color: #0d9488;
+  margin: 0 6px;
+}
+
+/* 营销落地页左侧品牌区，鼠标悬浮轻微上浮 */
+.brand-pitch {
+  transition: transform 0.25s ease;
+}
+.brand-pitch:hover {
+  transform: translateY(-2px);
 }

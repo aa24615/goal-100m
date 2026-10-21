@@ -27,6 +27,19 @@ services:
       PORT: 3001
       TICK_MS: 2000
       SNAPSHOT_MS: 60000
+      # 行情引擎：一个交易日包含的 tick 数、收盘后休市 tick 数、隔夜跳空波动率、盘中波动率
+      SESSION_TICKS: ${SESSION_TICKS:-120}
+      SESSION_BREAK_TICKS: ${SESSION_BREAK_TICKS:-5}
+      GAP_SIGMA: ${GAP_SIGMA:-0.015}
+      INTRADAY_VOL: ${INTRADAY_VOL:-0.0012}
+      PERSIST_EVERY_TICKS: ${PERSIST_EVERY_TICKS:-5}
+      # 设为 1 则按真实时钟 9:30-11:30 / 13:00-15:00 开市（演示压缩模式请保持 0）
+      REAL_CLOCK: ${REAL_CLOCK:-0}
+      # T+1 当日买入不可卖（设为 0 关闭）
+      T1_ENABLED: ${T1_ENABLED:-1}
+      PRICE_TOLERANCE: ${PRICE_TOLERANCE:-0.005}
+      # 跨域白名单，多个用逗号分隔；留空表示仅允许同源
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       TZ: Asia/Shanghai
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_DIR: /app/logs
@@ -34,6 +47,12 @@ services:
       - ./backend/logs:/app/logs
     expose:
       - "3001"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   frontend:
     build: ./frontend
@@ -42,6 +61,11 @@ services:
       - backend
     ports:
       - "8080:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
 volumes:
   pgdata:

@@ -6,13 +6,30 @@ import { logger } from './logger.js';
 import { asyncHandler } from './middleware.js';
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 const INITIAL_CAPITAL = 1000000; // 初始虚拟资金 ¥1,000,000
+
+// JWT 密钥：生产环境禁止使用默认密钥，启动时直接失败，避免被自签 token
+function resolveSecret() {
+  const s = process.env.JWT_SECRET;
+  const isProd = process.env.NODE_ENV === 'production';
+  if (!s || s === 'dev-secret-change-me') {
+    if (isProd) {
+      throw new Error('FATAL: 生产环境必须设置 JWT_SECRET 环境变量（禁止使用默认密钥）');
+    }
+    logger.warn('当前使用默认 JWT 密钥，仅允许在开发环境使用', { env: process.env.NODE_ENV });
+    return 'dev-secret-change-me';
+  }
+  if (s.length < 16) {
+    logger.warn('JWT_SECRET 长度不足 16 位，建议更换为更强的随机串');
+  }
+  return s;
+}
+
+const JWT_SECRET = resolveSecret();
 
 export function authMiddleware(req, res, next) {
   const h = req.headers.authorization;
   if (!h || !h.startsWith('Bearer ')) {
-    logger.warn('鉴权失败: 缺少 token', { path: req.originalUrl, ip: req.ip });
     return res.status(401).json({ error: '未登录' });
   }
   try {
@@ -33,37 +50,85 @@ function signToken(userId) {
   return jwt.sign({ sub: userId }, JWT_SECRET, { expiresIn: '7d' });
 }
 
+/** 校验 token，返回 userId；无效返回 null（供 WebSocket 鉴权使用） */
+export function verifyToken(token) {
+  if (!token) return null;
+  try {
+    const p = jwt.verify(token, JWT_SECRET);
+    return p.sub ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const norm = (v) => String(v || '').trim().toLowerCase();
+
+// 用户名与邮箱大小写归一化（配合表达式唯一索引）
+export async function ensureAuthSchema() {
+  try {
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username_lower ON users (lower(username))');
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_users_email_lower ON users (lower(email))');
+  } catch (e) {
+    logger.warn('大小写唯一索引创建失败（可能已存在大小写重复账号）', { err: e.message });
+  }
+}
+
+const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function validateRegister(username, email, password) {
+  if (!USERNAME_RE.test(username)) {
+    return '用户名需为 3-20 位字母、数字或下划线';
+  }
+  if (!EMAIL_RE.test(email)) {
+    return '邮箱格式不正确';
+  }
+  if (password.length < 8 || password.length > 32) {
+    return '密码长度需为 8-32 位';
+  }
+  if (/^\d+$/.test(password)) {
+    return '密码不能全为数字';
+  }
+  if (/^(.)\1+$/.test(password)) {
+    return '密码不能为同一字符重复';
+  }
+  return null;
+}
+
 router.post(
   '/register',
   asyncHandler(async (req, res) => {
     const { username, email, password } = req.body || {};
-    if (!username || !email || !password) {
-      logger.warn('注册失败: 参数缺失', { username, email, ip: req.ip });
+    const u = norm(username);
+    const em = norm(email);
+    if (!u || !em || !password) {
+      logger.warn('注册失败: 参数缺失', { username: u, email: em, ip: req.ip });
       return res.status(400).json({ error: '用户名、邮箱、密码均为必填' });
     }
-    if (password.length < 6) {
-      logger.warn('注册失败: 密码过短', { username, ip: req.ip });
-      return res.status(400).json({ error: '密码至少 6 位' });
+    const invalid = validateRegister(u, em, password);
+    if (invalid) {
+      logger.warn('注册失败: 校验不通过', { username: u, reason: invalid, ip: req.ip });
+      return res.status(400).json({ error: invalid });
     }
     const hash = await bcrypt.hash(password, 10);
     try {
       const { rows } = await pool.query(
         'INSERT INTO users (username, email, password_hash, cash, initial_capital) VALUES ($1, $2, $3, $4, $4) RETURNING id, username, email, cash',
-        [username, email, hash, INITIAL_CAPITAL]
+        [u, em, hash, INITIAL_CAPITAL]
       );
       const user = rows[0];
       const token = signToken(user.id);
-      logger.info('注册成功', { userId: user.id, username, email, ip: req.ip });
+      logger.info('注册成功', { userId: user.id, username: u, email: em, ip: req.ip });
       res.json({
         token,
         user: { id: user.id, username: user.username, email: user.email, cash: Number(user.cash) },
       });
     } catch (e) {
       if (e.code === '23505') {
-        logger.warn('注册失败: 用户名或邮箱已存在', { username, email, ip: req.ip });
+        logger.warn('注册失败: 用户名或邮箱已存在', { username: u, email: em, ip: req.ip });
         return res.status(409).json({ error: '用户名或邮箱已被注册' });
       }
-      logger.error('注册异常', { username, email, err: e });
+      logger.error('注册异常', { username: u, email: em, err: e });
       throw e;
     }
   })
@@ -73,19 +138,23 @@ router.post(
   '/login',
   asyncHandler(async (req, res) => {
     const { account, password } = req.body || {};
-    if (!account || !password) {
-      logger.warn('登录失败: 参数缺失', { account, ip: req.ip });
+    const acc = norm(account);
+    if (!acc || !password) {
+      logger.warn('登录失败: 参数缺失', { account: acc, ip: req.ip });
       return res.status(400).json({ error: '请输入账号和密码' });
     }
-    const { rows } = await pool.query('SELECT * FROM users WHERE username=$1 OR email=$1', [account]);
+    const { rows } = await pool.query(
+      'SELECT * FROM users WHERE lower(username)=$1 OR lower(email)=$1',
+      [acc]
+    );
     const user = rows[0];
     if (!user) {
-      logger.warn('登录失败: 账号不存在', { account, ip: req.ip });
+      logger.warn('登录失败: 账号不存在', { account: acc, ip: req.ip });
       return res.status(401).json({ error: '账号不存在' });
     }
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) {
-      logger.warn('登录失败: 密码错误', { account, userId: user.id, ip: req.ip });
+      logger.warn('登录失败: 密码错误', { account: acc, userId: user.id, ip: req.ip });
       return res.status(401).json({ error: '密码错误' });
     }
     const token = signToken(user.id);
@@ -118,6 +187,61 @@ router.get(
       initialCapital: Number(u.initial_capital),
       createdAt: u.created_at,
     });
+  })
+);
+
+// 修改密码（已登录）
+router.post(
+  '/account/password',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const { oldPassword, newPassword } = req.body || {};
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({ error: '请填写原密码与新密码' });
+    }
+    if (newPassword.length < 8 || newPassword.length > 32 || /^\d+$/.test(newPassword)) {
+      return res.status(400).json({ error: '新密码需 8-32 位且不能全为数字' });
+    }
+    const { rows } = await pool.query('SELECT password_hash FROM users WHERE id=$1', [req.userId]);
+    if (!rows[0]) return res.status(404).json({ error: '用户不存在' });
+    const ok = await bcrypt.compare(oldPassword, rows[0].password_hash);
+    if (!ok) {
+      logger.warn('修改密码失败: 原密码错误', { userId: req.userId, ip: req.ip });
+      return res.status(400).json({ error: '原密码不正确' });
+    }
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, req.userId]);
+    logger.info('修改密码成功', { userId: req.userId });
+    res.json({ ok: true });
+  })
+);
+
+// 重置模拟账户：清空持仓与交易记录，资金恢复初始，保留账号与身份
+router.post(
+  '/account/reset',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const uid = req.userId;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM holdings WHERE user_id=$1', [uid]);
+      await client.query('DELETE FROM transactions WHERE user_id=$1', [uid]);
+      await client.query('DELETE FROM asset_snapshots WHERE user_id=$1', [uid]);
+      await client.query('UPDATE users SET cash=$1, initial_capital=$1 WHERE id=$2', [
+        INITIAL_CAPITAL,
+        uid,
+      ]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      logger.error('重置账户失败', { userId: uid, err: e });
+      throw e;
+    } finally {
+      client.release();
+    }
+    logger.info('重置模拟账户成功', { userId: uid, capital: INITIAL_CAPITAL });
+    res.json({ ok: true, cash: INITIAL_CAPITAL });
   })
 );
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, Button, Space, Avatar, Dropdown, Typography, Tabs } from 'antd';
+import { Layout, Menu, Button, Space, Avatar, Dropdown, Typography, Tabs, Modal, Form, Input, App as AntApp } from 'antd';
 import {
   LineChartOutlined,
   StarOutlined,
@@ -10,8 +10,10 @@ import {
   LogoutOutlined,
   UserOutlined,
   DownOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import { useAuth } from './auth';
+import api from './api';
 import Login from './pages/Login';
 import Market from './pages/Market';
 import Watchlist from './pages/Watchlist';
@@ -87,11 +89,17 @@ function resolveLabel(path: string, names: Record<string, string>): string {
 }
 
 export default function App() {
-  const { token, user, assets, logout } = useAuth();
+  const { token, user, assets, logout, refreshAssets } = useAuth();
+  const { message } = AntApp.useApp();
   const navigate = useNavigate();
   const location = useLocation();
   const [tabs, setTabs] = useState<TabItem[]>(loadTabs);
   const [names, setNames] = useState<Record<string, string>>({});
+  const [pwdOpen, setPwdOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [pwdLoading, setPwdLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
+  const [pwdForm] = Form.useForm();
 
   // 只维护 code -> name 映射；名称未变化则返回原引用，避免每 tick 触发重渲染
   useEffect(
@@ -174,6 +182,8 @@ export default function App() {
       <Sider
         theme="light"
         width={200}
+        breakpoint="lg"
+        collapsedWidth={0}
         style={{ background: '#fff', borderRight: '1px solid #eef4f3' }}
       >
         <div className="logo">
@@ -193,10 +203,14 @@ export default function App() {
         <Header
           style={{
             background: '#fff',
-            padding: '0 24px',
+            padding: '0 16px',
+            minHeight: 64,
+            height: 'auto',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            rowGap: 8,
             boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
           }}
         >
@@ -218,6 +232,19 @@ export default function App() {
               menu={{
                 items: [
                   {
+                    key: 'account',
+                    icon: <UserOutlined />,
+                    label: '修改密码',
+                    onClick: () => setPwdOpen(true),
+                  },
+                  {
+                    key: 'reset',
+                    icon: <ReloadOutlined />,
+                    label: '重置模拟账户',
+                    onClick: () => setResetOpen(true),
+                  },
+                  { type: 'divider' },
+                  {
                     key: 'logout',
                     icon: <LogoutOutlined />,
                     label: '退出登录',
@@ -233,58 +260,150 @@ export default function App() {
             </Dropdown>
           </Space>
         </Header>
-        <Content style={{ margin: 16, padding: 0 }}>
-          <div
-            style={{
-              background: '#fff',
-              borderRadius: 10,
-              padding: '6px 12px 0',
-              marginBottom: 12,
+        <div className="tabbar">
+          <Tabs
+            hideAdd
+            size="small"
+            type="editable-card"
+            activeKey={pathname}
+            items={tabs.map((t) => ({ key: t.key, label: t.label, closable: t.closable }))}
+            onChange={(k) => navigate(k)}
+            onEdit={(e, action) => {
+              if (action === 'remove') removeTab(String(e));
             }}
-          >
-            <Tabs
-              hideAdd
-              size="small"
-              type="editable-card"
-              activeKey={pathname}
-              items={tabs.map((t) => ({ key: t.key, label: t.label, closable: t.closable }))}
-              onChange={(k) => navigate(k)}
-              onEdit={(e, action) => {
-                if (action === 'remove') removeTab(String(e));
-              }}
-              tabBarExtraContent={{
-                right: (
-                  <Dropdown
-                    menu={{
-                      items: [
-                        { key: 'others', label: '关闭其他' },
-                        { key: 'all', label: '关闭全部' },
-                      ],
-                      onClick: ({ key }) => {
-                        if (key === 'others') closeOthers();
-                        else if (key === 'all') closeAll();
-                      },
-                    }}
-                  >
-                    <Button size="small" type="text">
-                      标签操作 <DownOutlined />
-                    </Button>
-                  </Dropdown>
-                ),
-              }}
-            />
-          </div>
+            tabBarExtraContent={{
+              right: (
+                <Dropdown
+                  menu={{
+                    items: [
+                      { key: 'others', label: '关闭其他' },
+                      { key: 'all', label: '关闭全部' },
+                    ],
+                    onClick: ({ key }) => {
+                      if (key === 'others') closeOthers();
+                      else if (key === 'all') closeAll();
+                    },
+                  }}
+                >
+                  <Button size="small" type="text">
+                    标签操作 <DownOutlined />
+                  </Button>
+                </Dropdown>
+              ),
+            }}
+          />
+        </div>
 
-          <Routes>
-            <Route path="/market" element={<Market />} />
-            <Route path="/watchlist" element={<Watchlist />} />
-            <Route path="/stock/:code" element={<StockDetail />} />
-            <Route path="/portfolio" element={<Portfolio />} />
-            <Route path="/transactions" element={<Transactions />} />
-            <Route path="/leaderboard" element={<Leaderboard />} />
-          </Routes>
+        <Content style={{ margin: 16, padding: 0 }}>
+          <div className="page-card">
+            <Routes>
+              <Route path="/market" element={<Market />} />
+              <Route path="/watchlist" element={<Watchlist />} />
+              <Route path="/stock/:code" element={<StockDetail />} />
+              <Route path="/portfolio" element={<Portfolio />} />
+              <Route path="/transactions" element={<Transactions />} />
+              <Route path="/leaderboard" element={<Leaderboard />} />
+            </Routes>
+          </div>
         </Content>
       </Layout>
+
+      <Modal
+        title="修改密码"
+        open={pwdOpen}
+        onCancel={() => {
+          setPwdOpen(false);
+          pwdForm.resetFields();
+        }}
+        footer={null}
+      >
+        <Form
+          form={pwdForm}
+          layout="vertical"
+          onFinish={async (v) => {
+            setPwdLoading(true);
+            try {
+              await api.post('/account/password', {
+                oldPassword: v.oldPassword,
+                newPassword: v.newPassword,
+              });
+              message.success('密码修改成功');
+              setPwdOpen(false);
+              pwdForm.resetFields();
+            } catch (e: any) {
+              message.error(e?.response?.data?.error || '修改失败');
+            } finally {
+              setPwdLoading(false);
+            }
+          }}
+        >
+          <Form.Item name="oldPassword" label="原密码" rules={[{ required: true, message: '请输入原密码' }]}>
+            <Input.Password placeholder="原密码" />
+          </Form.Item>
+          <Form.Item
+            name="newPassword"
+            label="新密码"
+            rules={[
+              { required: true, message: '请输入新密码' },
+              { min: 8, max: 32, message: '8-32 位' },
+              {
+                validator: (_, val) =>
+                  !val || /^\d+$/.test(val)
+                    ? Promise.reject(new Error('密码不能全为数字'))
+                    : Promise.resolve(),
+              },
+            ]}
+          >
+            <Input.Password placeholder="8-32 位，建议字母+数字" />
+          </Form.Item>
+          <Form.Item
+            name="confirm"
+            label="确认新密码"
+            dependencies={['newPassword']}
+            rules={[
+              { required: true, message: '请再次输入' },
+              ({ getFieldValue }) => ({
+                validator: (_, val) =>
+                  !val || val === getFieldValue('newPassword')
+                    ? Promise.resolve()
+                    : Promise.reject(new Error('两次输入不一致')),
+              }),
+            ]}
+          >
+            <Input.Password placeholder="再次输入新密码" />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" block loading={pwdLoading}>
+            确认修改
+          </Button>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="重置模拟账户"
+        open={resetOpen}
+        onCancel={() => setResetOpen(false)}
+        onOk={async () => {
+          setResetLoading(true);
+          try {
+            await api.post('/account/reset');
+            message.success('账户已重置，资金恢复 ¥1,000,000');
+            setResetOpen(false);
+            await refreshAssets();
+          } catch (e: any) {
+            message.error(e?.response?.data?.error || '重置失败');
+          } finally {
+            setResetLoading(false);
+          }
+        }}
+        confirmLoading={resetLoading}
+        okText="确认重置"
+        cancelText="取消"
+      >
+        <p>
+          将清空你的 <b>全部持仓、交易记录与净值快照</b>，资金恢复为 ¥1,000,000。
+          账号与用户名保持不变。此操作不可恢复。
+        </p>
+      </Modal>
     </Layout>
   );
 }

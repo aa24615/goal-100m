@@ -7,8 +7,9 @@ import { asyncHandler } from '../middleware.js';
 
 /**
  * 资产曲线 / 账户分账
- * - 按「自然日」聚合 asset_snapshots，每天取当日最后一条快照作为该日收盘净值
- * - 缺失日期用前一交易日的值前值填充（ffill），保证曲线连续
+ * - gran=day（默认）：按「自然日」聚合 asset_snapshots，每天取当日最后一条快照作为该日收盘净值
+ * - gran=minute：今日分时，按分钟取当日最后一条快照（快照每分钟写入一次）
+ * - 缺失日期/分钟用前一已知值前值填充（ffill），保证曲线连续
  * - 序列最后一点用实时资产覆盖（持仓按当前行情价计算），保证"当下"准确
  * - 账户分账：资金账户 = 可用现金；交易账户 = 持仓市值
  */
@@ -25,6 +26,8 @@ const pct2 = (n) => Math.round(n * 100) / 100;
 const shDayIndex = (ms) => Math.floor((ms + 8 * HOUR) / DAY);
 const startOfShDay = (idx) => idx * DAY - 8 * HOUR;
 const dateStr = (idx) => new Date(startOfShDay(idx) + 8 * HOUR).toISOString().slice(0, 10);
+// 当前上海时间 HH:mm（不依赖进程 TZ，容器若跑在 UTC 下标签也不会错 8 小时）
+const nowHmStr = () => new Date(Date.now() + 8 * HOUR).toISOString().slice(11, 16);
 
 async function currentAccounts(uid) {
   const u = await pool.query('SELECT cash, initial_capital FROM users WHERE id=$1', [uid]);
@@ -39,11 +42,55 @@ async function currentAccounts(uid) {
   return { cash, marketValue: mv, totalAssets: cash + mv, initialCapital: Number(u.rows[0].initial_capital) };
 }
 
+// 把某一时刻的资产状态转成曲线上的一个点
+function point(date, a, initialCapital) {
+  const profit = a.totalAssets - initialCapital;
+  return {
+    date,
+    cash: r2(a.cash),
+    marketValue: r2(a.marketValue),
+    totalAssets: r2(a.totalAssets),
+    profit: r2(profit),
+    returnPct: pct2((profit / initialCapital) * 100),
+  };
+}
+
+// 最大回撤：相对历史最高净值的最大跌幅
+function summarize(series, accounts, initialCapital) {
+  let peak = -Infinity;
+  let maxDrawdown = 0;
+  for (const p of series) {
+    if (p.totalAssets > peak) peak = p.totalAssets;
+    if (peak > 0) {
+      const dd = ((peak - p.totalAssets) / peak) * 100;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+    }
+  }
+  return {
+    initialCapital,
+    accounts: {
+      cash: r2(accounts.cash),
+      marketValue: r2(accounts.marketValue),
+      totalAssets: r2(accounts.totalAssets),
+    },
+    summary: {
+      profit: r2(accounts.totalAssets - initialCapital),
+      returnPct: pct2(((accounts.totalAssets - initialCapital) / initialCapital) * 100),
+      maxDrawdown: pct2(maxDrawdown),
+      peak: r2(peak === -Infinity ? accounts.totalAssets : peak),
+    },
+    series,
+  };
+}
+
 router.get(
   '/equity',
   authMiddleware,
   asyncHandler(async (req, res) => {
     const uid = req.userId;
+    // 契约只认 day/minute，未知值一律按日线，避免前端 gran 字段出现第三种取值
+    const rawGran = String(req.query.gran || 'day').toLowerCase();
+    const gran = rawGran === 'minute' ? 'minute' : 'day';
     const raw = Number(req.query.days);
     const days = [7, 30, 90, 365, 0].includes(raw) ? raw : 30; // 0 = 全部
 
@@ -53,8 +100,70 @@ router.get(
       return res.status(404).json({ error: '用户不存在' });
     }
 
-    const createdIdx = shDayIndex(new Date(u.rows[0].created_at).getTime());
+    const accounts = await currentAccounts(uid);
+    if (!accounts) return res.status(404).json({ error: '用户不存在' });
+    const { initialCapital } = accounts;
+
     const todayIdx = shDayIndex(Date.now());
+
+    // ---------- 今日分时 ----------
+    if (gran === 'minute') {
+      const since = new Date(startOfShDay(todayIdx));
+
+      // 今日之前最近的一条快照，作为曲线起点前值；没有则用开户初始资金
+      const prev = await pool.query(
+        `SELECT cash, market_value, total_assets FROM asset_snapshots
+         WHERE user_id=$1 AND created_at < $2 ORDER BY created_at DESC LIMIT 1`,
+        [uid, since]
+      );
+
+      const q = await pool.query(
+        `SELECT DISTINCT ON (b) b,
+                to_char(b, 'YYYY-MM-DD HH24:MI') AS label,
+                cash, market_value, total_assets
+         FROM (
+           SELECT date_trunc('minute', created_at AT TIME ZONE $2) AS b,
+                  cash, market_value, total_assets, created_at
+           FROM asset_snapshots
+           WHERE user_id = $1 AND created_at >= $3
+         ) t
+         ORDER BY b, created_at DESC`,
+        [uid, TZ, since]
+      );
+
+      const series = [];
+      for (const r of q.rows) {
+        series.push(
+          point(
+            r.label,
+            {
+              cash: Number(r.cash),
+              marketValue: Number(r.market_value),
+              totalAssets: Number(r.total_assets),
+            },
+            initialCapital
+          )
+        );
+      }
+      // 末点用实时资产覆盖，保证「当下」准确；若当前分钟已有快照则覆盖该点，避免出现重复横坐标
+      const liveLabel = `${dateStr(todayIdx)} ${nowHmStr()}`;
+      const livePoint = point(liveLabel, accounts, initialCapital);
+      if (series.length > 0 && series[series.length - 1].date === liveLabel) {
+        series[series.length - 1] = livePoint;
+      } else {
+        series.push(livePoint);
+      }
+
+      return res.json({
+        ...summarize(series, accounts, initialCapital),
+        gran: 'minute',
+        days: 1,
+        range: { from: series[0]?.date ?? '-', to: series[series.length - 1]?.date ?? '-' },
+      });
+    }
+
+    // ---------- 日线 ----------
+    const createdIdx = shDayIndex(new Date(u.rows[0].created_at).getTime());
     const fromIdx = days > 0 ? Math.max(createdIdx, todayIdx - (days - 1)) : createdIdx;
 
     // 多取 30 天，用于拿到区间起点之前最近的一条快照做前值填充
@@ -85,72 +194,6 @@ router.get(
     }
     allDays.sort();
 
-    const accounts = await currentAccounts(uid);
-    if (!accounts) return res.status(404).json({ error: '用户不存在' });
-    const { initialCapital } = accounts;
-
-    // 分钟级（今日分时）：日级点数不足时的兜底粒度，让开户当天也能看到曲线
-    if (req.query.gran === 'minute') {
-      const sinceMs = startOfShDay(todayIdx);
-      const m = await pool.query(
-        `SELECT to_char(created_at AT TIME ZONE $2, 'MM-DD HH24:MI') AS ts,
-                total_assets, cash, market_value
-         FROM asset_snapshots
-         WHERE user_id = $1 AND created_at >= $3
-         ORDER BY created_at ASC`,
-        [uid, TZ, new Date(sinceMs)]
-      );
-      const step = Math.max(1, Math.ceil(m.rows.length / 300)); // 抽样，最多约 300 点
-      const picked = m.rows.filter((_, i) => i % step === 0 || i === m.rows.length - 1);
-      const minuteSeries = picked.map((r) => {
-        const total = Number(r.total_assets);
-        const profit = total - initialCapital;
-        return {
-          date: r.ts,
-          cash: r2(Number(r.cash)),
-          marketValue: r2(Number(r.market_value)),
-          totalAssets: r2(total),
-          profit: r2(profit),
-          returnPct: pct2((profit / initialCapital) * 100),
-        };
-      });
-      if (minuteSeries.length > 0) {
-        const profit = accounts.totalAssets - initialCapital;
-        minuteSeries[minuteSeries.length - 1] = {
-          date: '现在',
-          cash: r2(accounts.cash),
-          marketValue: r2(accounts.marketValue),
-          totalAssets: r2(accounts.totalAssets),
-          profit: r2(profit),
-          returnPct: pct2((profit / initialCapital) * 100),
-        };
-      }
-      let mPeak = -Infinity;
-      let mDd = 0;
-      for (const p of minuteSeries) {
-        if (p.totalAssets > mPeak) mPeak = p.totalAssets;
-        if (mPeak > 0) mDd = Math.max(mDd, ((mPeak - p.totalAssets) / mPeak) * 100);
-      }
-      return res.json({
-        initialCapital,
-        days: 1,
-        gran: 'minute',
-        range: { from: dateStr(todayIdx), to: '现在' },
-        accounts: {
-          cash: r2(accounts.cash),
-          marketValue: r2(accounts.marketValue),
-          totalAssets: r2(accounts.totalAssets),
-        },
-        summary: {
-          profit: r2(accounts.totalAssets - initialCapital),
-          returnPct: pct2(((accounts.totalAssets - initialCapital) / initialCapital) * 100),
-          maxDrawdown: pct2(mDd),
-          peak: r2(mPeak === -Infinity ? accounts.totalAssets : mPeak),
-        },
-        series: minuteSeries,
-      });
-    }
-
     // 起始前值：区间起点之前最近的一条快照，没有则用「开户初始资金（全额现金）」
     let last = { cash: initialCapital, marketValue: 0, totalAssets: initialCapital };
     for (const ds of allDays) {
@@ -162,58 +205,19 @@ router.get(
     for (let i = fromIdx; i <= todayIdx; i += 1) {
       const ds = dateStr(i);
       if (byDay.has(ds)) last = byDay.get(ds);
-      const profit = last.totalAssets - initialCapital;
-      series.push({
-        date: ds,
-        cash: r2(last.cash),
-        marketValue: r2(last.marketValue),
-        totalAssets: r2(last.totalAssets),
-        profit: r2(profit),
-        returnPct: pct2((profit / initialCapital) * 100),
-      });
+      series.push(point(ds, last, initialCapital));
     }
 
     // 末点用实时资产覆盖，保证「当下」准确
     if (series.length > 0) {
-      const profit = accounts.totalAssets - initialCapital;
-      series[series.length - 1] = {
-        date: dateStr(todayIdx),
-        cash: r2(accounts.cash),
-        marketValue: r2(accounts.marketValue),
-        totalAssets: r2(accounts.totalAssets),
-        profit: r2(profit),
-        returnPct: pct2((profit / initialCapital) * 100),
-      };
-    }
-
-    // 最大回撤：相对历史最高净值的最大跌幅
-    let peak = -Infinity;
-    let maxDrawdown = 0;
-    for (const p of series) {
-      if (p.totalAssets > peak) peak = p.totalAssets;
-      if (peak > 0) {
-        const dd = ((peak - p.totalAssets) / peak) * 100;
-        if (dd > maxDrawdown) maxDrawdown = dd;
-      }
+      series[series.length - 1] = point(dateStr(todayIdx), accounts, initialCapital);
     }
 
     res.json({
-      initialCapital,
-      days,
+      ...summarize(series, accounts, initialCapital),
       gran: 'day',
+      days,
       range: { from: dateStr(fromIdx), to: dateStr(todayIdx) },
-      accounts: {
-        cash: r2(accounts.cash),
-        marketValue: r2(accounts.marketValue),
-        totalAssets: r2(accounts.totalAssets),
-      },
-      summary: {
-        profit: r2(accounts.totalAssets - initialCapital),
-        returnPct: pct2(((accounts.totalAssets - initialCapital) / initialCapital) * 100),
-        maxDrawdown: pct2(maxDrawdown),
-        peak: r2(peak === -Infinity ? accounts.totalAssets : peak),
-      },
-      series,
     });
   })
 );

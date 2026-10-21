@@ -5,7 +5,7 @@ import api from '../api';
 import { useAuth } from '../auth';
 import TradePanel from '../components/TradePanel';
 import EquityChart, { type EquityMetric } from '../components/EquityChart';
-import type { Portfolio as PF, Holding, EquityResponse } from '../types';
+import type { Portfolio as PF, Holding, EquityResponse, Order } from '../types';
 import { formatMoney, formatPct, changeClass } from '../utils';
 
 export default function Portfolio() {
@@ -17,6 +17,14 @@ export default function Portfolio() {
   const [days, setDays] = useState<number>(30);
   const [metric, setMetric] = useState<EquityMetric>('total');
   const [sellTarget, setSellTarget] = useState<Holding | null>(null);
+  const [orders, setOrders] = useState<Order[]>([]);
+
+  const loadOrders = useCallback(() => {
+    api
+      .get<Order[]>('/orders', { params: { status: 'PENDING' } })
+      .then((r) => setOrders(r.data))
+      .catch(() => setOrders([]));
+  }, []);
 
   const load = useCallback(() => {
     api.get<PF>('/portfolio').then((r) => setData(r.data));
@@ -39,7 +47,8 @@ export default function Portfolio() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadOrders();
+  }, [load, loadOrders]);
 
   useEffect(() => {
     loadEquity();
@@ -48,8 +57,19 @@ export default function Portfolio() {
   const onTraded = () => {
     load();
     loadEquity();
+    loadOrders();
     refreshAssets();
     setSellTarget(null);
+  };
+
+  const cancelOrder = async (id: number) => {
+    try {
+      await api.delete(`/orders/${id}`);
+      message.success('委托已撤销');
+      loadOrders();
+    } catch (e: any) {
+      message.error(e?.response?.data?.error || '撤单失败');
+    }
   };
 
   const cash = equity?.accounts.cash ?? data?.cash ?? 0;
@@ -177,6 +197,70 @@ export default function Portfolio() {
         </div>
       </Card>
 
+      {orders.length > 0 && (
+        <Card
+          title="我的委托"
+          size="small"
+          style={{ marginBottom: 16 }}
+          extra={<span style={{ color: '#8c8c8c', fontSize: 12 }}>行情达到委托价后自动成交</span>}
+        >
+          <Table
+            rowKey="id"
+            size="small"
+            pagination={false}
+            dataSource={orders}
+            locale={{ emptyText: '暂无委托' }}
+            columns={[
+              {
+                title: '标的',
+                render: (_: any, o: Order) => (
+                  <a onClick={() => navigate(`/stock/${o.code}`)}>
+                    {o.name} {o.code}
+                  </a>
+                ),
+              },
+              {
+                title: '方向',
+                dataIndex: 'side',
+                render: (v: string) =>
+                  v === 'BUY' ? (
+                    <span style={{ color: '#0d9488' }}>买入</span>
+                  ) : (
+                    <span style={{ color: '#5f807d' }}>卖出</span>
+                  ),
+              },
+              {
+                title: '委托价',
+                dataIndex: 'limitPrice',
+                align: 'right' as const,
+                render: (v: number) => <span className="money">{formatMoney(v)}</span>,
+              },
+              { title: '数量', dataIndex: 'quantity', align: 'right' as const },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                render: (v: string, o: Order) => (
+                  <span>
+                    {v === 'PENDING' ? '等待成交' : v === 'FILLED' ? '已成交' : '已撤销'}
+                    {o.note ? (
+                      <span style={{ color: '#bfbfbf', marginLeft: 6, fontSize: 12 }}>{o.note}</span>
+                    ) : null}
+                  </span>
+                ),
+              },
+              {
+                title: '操作',
+                render: (_: any, o: Order) => (
+                  <Button size="small" type="text" onClick={() => cancelOrder(o.id)}>
+                    撤单
+                  </Button>
+                ),
+              },
+            ]}
+          />
+        </Card>
+      )}
+
       <Card title="当前持仓">
         <Table
           rowKey="code"
@@ -198,7 +282,8 @@ export default function Portfolio() {
           <TradePanel
             code={sellTarget.code}
             mode="SELL"
-            initialQuantity={sellTarget.quantity}
+            initialQuantity={sellTarget.availableQty}
+            availableQty={sellTarget.availableQty}
             onTraded={onTraded}
           />
         )}

@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS stocks (
   high        NUMERIC(12,2) NOT NULL,
   low         NUMERIC(12,2) NOT NULL,
   volume      BIGINT        NOT NULL DEFAULT 0,
+  day_amount  NUMERIC(18,2) NOT NULL DEFAULT 0,
+  shares      BIGINT,
   updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
@@ -61,3 +63,25 @@ CREATE INDEX IF NOT EXISTS idx_holdings_user ON holdings(user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_time ON transactions(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_user_time ON asset_snapshots(user_id, created_at DESC);
+
+-- 日线行情：每个交易日一条，重启后据此恢复，避免价格跳变
+CREATE TABLE IF NOT EXISTS stock_daily (
+  code       VARCHAR(10) NOT NULL REFERENCES stocks(code) ON DELETE CASCADE,
+  seq        INTEGER NOT NULL,
+  trade_date DATE NOT NULL,
+  open       NUMERIC(12,2) NOT NULL,
+  high       NUMERIC(12,2) NOT NULL,
+  low        NUMERIC(12,2) NOT NULL,
+  close      NUMERIC(12,2) NOT NULL,
+  volume     BIGINT NOT NULL DEFAULT 0,
+  amount     NUMERIC(18,2) NOT NULL DEFAULT 0,
+  prev_close NUMERIC(12,2) NOT NULL DEFAULT 0,
+  PRIMARY KEY (code, seq)
+);
+
+-- 交易日历状态（交易日序号、已走 tick 数、当前阶段）
+CREATE TABLE IF NOT EXISTS market_meta (
+  k          TEXT PRIMARY KEY,
+  v          TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import api from './api';
+import api, { setUnauthorizedHandler } from './api';
+import { reconnect as reconnectWs } from './ws';
 import type { User, Portfolio } from './types';
 
 interface AuthContextValue {
@@ -28,6 +29,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // 401 时由拦截器回调清理登录态，避免硬跳转导致内存态残留
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setToken(null);
+      setUser(null);
+      setAssets(null);
+    });
+  }, []);
+
   useEffect(() => {
     if (!token) {
       setUser(null);
@@ -49,6 +59,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('pt_token', r.data.token);
     setToken(r.data.token);
     setUser(r.data.user);
+    reconnectWs(); // 用新 token 重建行情连接
   };
 
   const register = async (username: string, email: string, password: string) => {
@@ -56,12 +67,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('pt_token', r.data.token);
     setToken(r.data.token);
     setUser(r.data.user);
+    reconnectWs();
   };
 
   const logout = () => {
     localStorage.removeItem('pt_token');
     setToken(null);
     setUser(null);
+    setAssets(null);
+    reconnectWs();
   };
 
   return (

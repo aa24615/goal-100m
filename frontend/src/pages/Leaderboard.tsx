@@ -25,12 +25,18 @@ export default function Leaderboard() {
   const [rows, setRows] = useState<LeaderRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [period, setPeriod] = useState<string>('all');
+  const [benchmarkPct, setBenchmarkPct] = useState<number>(0);
 
   useEffect(() => {
     setLoading(true);
-    api
-      .get<LeaderRow[]>('/leaderboard', { params: { period } })
-      .then((r) => setRows(r.data))
+    Promise.all([
+      api.get<LeaderRow[]>('/leaderboard', { params: { period } }),
+      api.get<{ benchmarkPct: number }>('/leaderboard/benchmark', { params: { period } }),
+    ])
+      .then(([r, b]) => {
+        setRows(r.data);
+        setBenchmarkPct(b.data?.benchmarkPct ?? 0);
+      })
       .finally(() => setLoading(false));
   }, [period]);
 
@@ -86,6 +92,21 @@ export default function Leaderboard() {
         </span>
       ),
     },
+    {
+      title: '超越大盘',
+      dataIndex: 'excessPct',
+      align: 'right' as const,
+      sorter: (a: LeaderRow, b: LeaderRow) => a.excessPct - b.excessPct,
+      render: (v: number) => (
+        <span className={`money ${changeClass(v)}`}>{v === undefined ? '-' : formatPct(v)}</span>
+      ),
+    },
+    {
+      title: '交易次数',
+      dataIndex: 'tradeCount',
+      align: 'right' as const,
+      render: (v: number) => <span style={{ color: v ? undefined : '#bfbfbf' }}>{v ?? 0}</span>,
+    },
   ];
 
   return (
@@ -103,10 +124,11 @@ export default function Leaderboard() {
         locale={{ emptyText: <Empty description="暂无选手" /> }}
       />
       <Text type="secondary" style={{ display: 'block', marginTop: 12, fontSize: 12 }}>
-        周期收益率 =（当前总资产 − {meta.base}资产）÷ {meta.base}资产。
+        周期收益率 =（当前总资产 − {meta.base}资产）÷ {meta.base}资产；
+        「超越大盘」= 个人收益率 − 同期大盘指数涨跌幅（当前大盘 {formatPct(benchmarkPct)}）。
         {period === 'all'
           ? '总榜以注册时赠送的 ¥1,000,000 初始资金为基准。'
-          : '系统每分钟记录一次资产快照作为周期基准，快照积累越多周期榜越准确。'}
+          : '系统每分钟记录一次资产快照与大盘指数作为周期基准，快照积累越多周期榜越准确。'}
       </Text>
     </Card>
   );
