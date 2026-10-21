@@ -73,6 +73,57 @@ export async function ensureAuthSchema() {
   }
 }
 
+// 个人资料扩展字段：昵称 display_name 与头像 avatar（预设 key）。幂等追加，兼容已有库。
+export async function ensureProfileSchema() {
+  const cols = [
+    'ALTER TABLE users ADD COLUMN display_name VARCHAR(40)',
+    'ALTER TABLE users ADD COLUMN avatar VARCHAR(20)',
+  ];
+  for (const sql of cols) {
+    try {
+      await pool.query(sql);
+    } catch (e) {
+      // 42701 = 字段已存在，属正常情况
+      if (e?.code !== '42701') {
+        logger.error('用户资料扩展字段初始化失败', { err: e });
+        throw e;
+      }
+    }
+  }
+  logger.info('用户资料扩展字段已就绪(display_name/avatar)');
+}
+
+// 头像预设 key 白名单（前端对应渲染 emoji + 配色）
+const AVATAR_KEYS = new Set([
+  'none',
+  'panda',
+  'fox',
+  'tiger',
+  'cat',
+  'dog',
+  'rabbit',
+  'owl',
+  'monkey',
+  'lion',
+  'frog',
+  'penguin',
+  'crab',
+]);
+
+// 统一构造返回给前端的用户对象；display_name 缺省回落到用户名
+function userPayload(u) {
+  return {
+    id: u.id,
+    username: u.username,
+    email: u.email,
+    displayName: u.display_name ?? u.username,
+    avatar: u.avatar ?? null,
+    cash: Number(u.cash),
+    initialCapital: Number(u.initial_capital),
+    createdAt: u.created_at,
+  };
+}
+
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -119,10 +170,7 @@ router.post(
       const user = rows[0];
       const token = signToken(user.id);
       logger.info('注册成功', { userId: user.id, username: u, email: em, ip: req.ip });
-      res.json({
-        token,
-        user: { id: user.id, username: user.username, email: user.email, cash: Number(user.cash) },
-      });
+      res.json({ token, user: userPayload(user) });
     } catch (e) {
       if (e.code === '23505') {
         logger.warn('注册失败: 用户名或邮箱已存在', { username: u, email: em, ip: req.ip });
@@ -159,10 +207,7 @@ router.post(
     }
     const token = signToken(user.id);
     logger.info('登录成功', { userId: user.id, username: user.username, ip: req.ip });
-    res.json({
-      token,
-      user: { id: user.id, username: user.username, email: user.email, cash: Number(user.cash) },
-    });
+    res.json({ token, user: userPayload(user) });
   })
 );
 
@@ -171,22 +216,66 @@ router.get(
   authMiddleware,
   asyncHandler(async (req, res) => {
     const { rows } = await pool.query(
-      'SELECT id, username, email, cash, initial_capital, created_at FROM users WHERE id=$1',
+      'SELECT id, username, email, display_name, avatar, cash, initial_capital, created_at FROM users WHERE id=$1',
       [req.userId]
     );
     if (!rows[0]) {
       logger.warn('查询用户信息失败: 用户不存在', { userId: req.userId });
       return res.status(404).json({ error: '用户不存在' });
     }
-    const u = rows[0];
-    res.json({
-      id: u.id,
-      username: u.username,
-      email: u.email,
-      cash: Number(u.cash),
-      initialCapital: Number(u.initial_capital),
-      createdAt: u.created_at,
-    });
+    res.json(userPayload(rows[0]));
+  })
+);
+
+// 个人资料：读取
+router.get(
+  '/profile',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const { rows } = await pool.query(
+      'SELECT id, username, email, display_name, avatar, cash, initial_capital, created_at FROM users WHERE id=$1',
+      [req.userId]
+    );
+    if (!rows[0]) return res.status(404).json({ error: '用户不存在' });
+    res.json(userPayload(rows[0]));
+  })
+);
+
+// 个人资料：更新（昵称 / 头像）
+router.put(
+  '/profile',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const { displayName, avatar } = req.body || {};
+    const sets = [];
+    const params = [];
+    let i = 1;
+    if (displayName !== undefined) {
+      const dn = String(displayName).trim();
+      if (dn.length === 0 || dn.length > 40) {
+        return res.status(400).json({ error: '昵称长度需为 1-40 个字符' });
+      }
+      sets.push(`display_name=$${i++}`);
+      params.push(dn);
+    }
+    if (avatar !== undefined) {
+      const av = avatar === null ? null : String(avatar).trim();
+      if (av && av !== 'none' && !AVATAR_KEYS.has(av)) {
+        return res.status(400).json({ error: '头像无效' });
+      }
+      sets.push(`avatar=$${i++}`);
+      params.push(av && av !== 'none' ? av : null);
+    }
+    if (sets.length === 0) {
+      return res.status(400).json({ error: '没有可更新的字段' });
+    }
+    params.push(req.userId);
+    const { rows } = await pool.query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id=$${i} RETURNING id, username, email, display_name, avatar, cash, initial_capital, created_at`,
+      params
+    );
+    logger.info('更新个人资料', { userId: req.userId, fields: Object.keys(req.body || {}) });
+    res.json(userPayload(rows[0]));
   })
 );
 

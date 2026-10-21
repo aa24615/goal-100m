@@ -11,6 +11,7 @@ interface AuthContextValue {
   register: (username: string, email: string, password: string) => Promise<void>;
   logout: () => void;
   refreshAssets: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -62,6 +63,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     reconnectWs(); // 用新 token 重建行情连接
   };
 
+  // 重新拉取当前用户资料（资料页修改昵称/头像后调用，使顶栏即时刷新）
+  const refreshUser = useCallback(async () => {
+    try {
+      const r = await api.get<User>('/me');
+      setUser(r.data);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const register = async (username: string, email: string, password: string) => {
     const r = await api.post<{ token: string; user: User }>('/auth/register', { username, email, password });
     localStorage.setItem('pt_token', r.data.token);
@@ -79,7 +90,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ token, user, assets, login, register, logout, refreshAssets }}>
+    <AuthContext.Provider value={{ token, user, assets, login, register, logout, refreshAssets, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

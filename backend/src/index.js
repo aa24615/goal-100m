@@ -4,7 +4,7 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import { WebSocketServer } from 'ws';
 import pool from './db.js';
-import authRoutes, { ensureAuthSchema, verifyToken } from './auth.js';
+import authRoutes, { ensureAuthSchema, ensureProfileSchema, verifyToken } from './auth.js';
 import marketRoutes from './routes/market.js';
 import tradeRoutes from './routes/trade.js';
 import leaderboardRoutes from './routes/leaderboard.js';
@@ -185,6 +185,7 @@ async function main() {
   logger.info('数据库连接成功');
   await seedStocks();
   await ensureAuthSchema();
+  await ensureProfileSchema();
   await loadMarket();
   await ensureTradeSchema();
   await ensureWatchlistSchema();

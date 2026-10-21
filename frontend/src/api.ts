@@ -29,3 +29,11 @@ api.interceptors.response.use(
 );
 
 export default api;
+
+export interface ProfileUpdate {
+  displayName?: string;
+  avatar?: string | null;
+}
+
+export const getProfile = () => api.get<User>('/profile');
+export const updateProfile = (data: ProfileUpdate) => api.put<User>('/profile', data);

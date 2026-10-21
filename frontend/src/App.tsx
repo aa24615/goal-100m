@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, Button, Space, Avatar, Dropdown, Typography, Tabs, Modal, Form, Input, App as AntApp } from 'antd';
 import {
@@ -21,8 +21,10 @@ import StockDetail from './pages/StockDetail';
 import Portfolio from './pages/Portfolio';
 import Transactions from './pages/Transactions';
 import Leaderboard from './pages/Leaderboard';
+import Profile from './pages/Profile';
 import { formatMoney } from './utils';
 import { subscribe } from './ws';
+import { getAvatar } from './avatars';
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -33,6 +35,7 @@ const menuItems = [
   { key: '/portfolio', icon: <WalletOutlined />, label: '我的持仓' },
   { key: '/transactions', icon: <HistoryOutlined />, label: '交易记录' },
   { key: '/leaderboard', icon: <TrophyOutlined />, label: '收益排行榜' },
+  { key: '/profile', icon: <UserOutlined />, label: '个人资料' },
 ];
 
 const MENU_LABEL: Record<string, string> = {
@@ -41,6 +44,7 @@ const MENU_LABEL: Record<string, string> = {
   '/portfolio': '我的持仓',
   '/transactions': '交易记录',
   '/leaderboard': '收益排行榜',
+  '/profile': '个人资料',
 };
 
 const HOME = '/market';
@@ -95,6 +99,8 @@ export default function App() {
   const location = useLocation();
   const [tabs, setTabs] = useState<TabItem[]>(loadTabs);
   const [names, setNames] = useState<Record<string, string>>({});
+  // 顶栏头像：优先展示用户所选预设头像，否则用昵称/用户名首字母
+  const avatarPreset = useMemo(() => getAvatar(user?.avatar), [user?.avatar]);
   const [pwdOpen, setPwdOpen] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
@@ -173,7 +179,7 @@ export default function App() {
   };
 
   const selectedKey =
-    ['/market', '/watchlist', '/portfolio', '/transactions', '/leaderboard'].find((k) =>
+    ['/market', '/watchlist', '/portfolio', '/transactions', '/leaderboard', '/profile'].find((k) =>
       pathname.startsWith(k)
     ) || '/market';
 
@@ -232,6 +238,12 @@ export default function App() {
               menu={{
                 items: [
                   {
+                    key: 'profile',
+                    icon: <UserOutlined />,
+                    label: '个人资料',
+                    onClick: () => navigate('/profile'),
+                  },
+                  {
                     key: 'account',
                     icon: <UserOutlined />,
                     label: '修改密码',
@@ -254,8 +266,12 @@ export default function App() {
               }}
             >
               <Space style={{ cursor: 'pointer' }}>
-                <Avatar icon={<UserOutlined />} style={{ background: '#0ea5a4' }} />
-                <Text>{user?.username}</Text>
+                <Avatar style={{ background: avatarPreset?.color || '#0ea5a4' }}>
+                  {avatarPreset
+                    ? avatarPreset.emoji
+                    : (user?.displayName || user?.username || '?').charAt(0).toUpperCase()}
+                </Avatar>
+                <Text>{user?.displayName || user?.username}</Text>
               </Space>
             </Dropdown>
           </Space>
@@ -303,6 +319,7 @@ export default function App() {
               <Route path="/portfolio" element={<Portfolio />} />
               <Route path="/transactions" element={<Transactions />} />
               <Route path="/leaderboard" element={<Leaderboard />} />
+              <Route path="/profile" element={<Profile />} />
             </Routes>
           </div>
         </Content>

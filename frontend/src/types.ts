@@ -68,6 +68,8 @@ export interface User {
   id: number;
   username: string;
   email: string;
+  displayName?: string;
+  avatar?: string | null;
   cash: number;
   initialCapital: number;
   createdAt: string;
