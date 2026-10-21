@@ -4,7 +4,7 @@ import { Card, Descriptions, Button, Space, Spin, Tag, App, Empty } from 'antd';
 import { ArrowLeftOutlined, StarOutlined, StarFilled } from '@ant-design/icons';
 import api from '../api';
 import { subscribe } from '../ws';
-import { useWatchlist } from '../useWatchlist';
+import { useWatchlist } from '../hooks/useWatchlist';
 import StockChart from '../components/StockChart';
 import TradePanel from '../components/TradePanel';
 import type { StockDetail as Detail, StockQuote } from '../types';

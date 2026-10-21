@@ -4,6 +4,7 @@ import { useAuth } from '../auth';
 import { updateProfile } from '../api';
 import { AVATARS, getAvatar } from '../avatars';
 import { formatMoney } from '../utils';
+import UserAvatar from '../components/UserAvatar';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -46,9 +47,7 @@ export default function Profile() {
 
       <Card style={{ marginBottom: 16 }}>
         <Space align="center" size="large">
-          <Avatar size={72} style={{ background: current?.color || '#0ea5a4', fontSize: 36 }}>
-            {current ? current.emoji : (user?.displayName || user?.username || '?').charAt(0).toUpperCase()}
-          </Avatar>
+          <UserAvatar avatarKey={avatar} name={user?.displayName} username={user?.username} size={72} fontSize={36} />
           <div>
             <div style={{ fontSize: 18, fontWeight: 600 }}>{user?.displayName || user?.username}</div>
             <Text type="secondary">@{user?.username}</Text>

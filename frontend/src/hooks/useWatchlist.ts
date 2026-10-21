@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import api from './api';
-import { useAuth } from './auth';
+import api from '../api';
+import { useAuth } from '../auth';
 
 /**
  * 自选股：后端持久化为主，localStorage 仅作离线兜底与首屏加速。

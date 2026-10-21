@@ -7,17 +7,20 @@ import TradePanel from '../components/TradePanel';
 import EquityChart, { type EquityMetric } from '../components/EquityChart';
 import type { Portfolio as PF, Holding, EquityResponse, Order } from '../types';
 import { formatMoney, formatPct, changeClass } from '../utils';
+import { usePortfolio } from '../hooks/usePortfolio';
+import { useEquity } from '../hooks/useEquity';
 
 export default function Portfolio() {
   const navigate = useNavigate();
   const { refreshAssets } = useAuth();
   const { message } = App.useApp();
-  const [data, setData] = useState<PF | null>(null);
-  const [equity, setEquity] = useState<EquityResponse | null>(null);
   const [days, setDays] = useState<number>(30);
   const [metric, setMetric] = useState<EquityMetric>('total');
   const [sellTarget, setSellTarget] = useState<Holding | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
+
+  const { data, reload: reloadPortfolio } = usePortfolio();
+  const { equity, reload: reloadEquity } = useEquity(days);
 
   const loadOrders = useCallback(() => {
     api
@@ -26,37 +29,13 @@ export default function Portfolio() {
       .catch(() => setOrders([]));
   }, []);
 
-  const load = useCallback(() => {
-    api.get<PF>('/portfolio').then((r) => setData(r.data));
-  }, []);
-
-  const loadEquity = useCallback(async () => {
-    try {
-      const r = await api.get<EquityResponse>('/equity', { params: { days } });
-      // 日级点数不足（开户当天）时，回退到今日分时粒度，保证曲线立刻可用
-      if (r.data.series.length < 3) {
-        const m = await api.get<EquityResponse>('/equity', { params: { days: 1, gran: 'minute' } });
-        setEquity(m.data.series.length >= 2 ? m.data : r.data);
-      } else {
-        setEquity(r.data);
-      }
-    } catch {
-      /* 曲线加载失败不阻塞页面其余部分 */
-    }
-  }, [days]);
-
   useEffect(() => {
-    load();
     loadOrders();
-  }, [load, loadOrders]);
-
-  useEffect(() => {
-    loadEquity();
-  }, [loadEquity]);
+  }, [loadOrders]);
 
   const onTraded = () => {
-    load();
-    loadEquity();
+    reloadPortfolio();
+    reloadEquity();
     loadOrders();
     refreshAssets();
     setSellTarget(null);

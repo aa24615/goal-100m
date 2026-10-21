@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, Button, Space, Avatar, Dropdown, Typography, Tabs, Modal, Form, Input, App as AntApp } from 'antd';
+import { Layout, Menu, Space, Dropdown, Typography, Modal, Form, Input, App as AntApp } from 'antd';
 import {
   LineChartOutlined,
   StarOutlined,
@@ -9,7 +9,6 @@ import {
   TrophyOutlined,
   LogoutOutlined,
   UserOutlined,
-  DownOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
 import { useAuth } from './auth';
@@ -24,31 +23,23 @@ import Leaderboard from './pages/Leaderboard';
 import Profile from './pages/Profile';
 import { formatMoney } from './utils';
 import { subscribe } from './ws';
-import { getAvatar } from './avatars';
+import UserAvatar from './components/UserAvatar';
+import TabBar from './components/TabBar';
+import { HOME, TABS_TABS_STORAGE_KEY, NAV_ORDER, MENU_LABEL } from './constants';
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
 
-const menuItems = [
-  { key: '/market', icon: <LineChartOutlined />, label: '行情中心' },
-  { key: '/watchlist', icon: <StarOutlined />, label: '自选股' },
-  { key: '/portfolio', icon: <WalletOutlined />, label: '我的持仓' },
-  { key: '/transactions', icon: <HistoryOutlined />, label: '交易记录' },
-  { key: '/leaderboard', icon: <TrophyOutlined />, label: '收益排行榜' },
-  { key: '/profile', icon: <UserOutlined />, label: '个人资料' },
-];
-
-const MENU_LABEL: Record<string, string> = {
-  '/market': '行情中心',
-  '/watchlist': '自选股',
-  '/portfolio': '我的持仓',
-  '/transactions': '交易记录',
-  '/leaderboard': '收益排行榜',
-  '/profile': '个人资料',
+const NAV_ICONS: Record<string, React.ReactNode> = {
+  '/market': <LineChartOutlined />,
+  '/watchlist': <StarOutlined />,
+  '/portfolio': <WalletOutlined />,
+  '/transactions': <HistoryOutlined />,
+  '/leaderboard': <TrophyOutlined />,
+  '/profile': <UserOutlined />,
 };
 
-const HOME = '/market';
-const STORAGE_KEY = 'qc_tabs';
+const menuItems = NAV_ORDER.map((key) => ({ key, icon: NAV_ICONS[key], label: MENU_LABEL[key] }));
 
 interface TabItem {
   key: string;
@@ -62,7 +53,7 @@ function homeTab(): TabItem {
 
 function loadTabs(): TabItem[] {
   try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
+    const raw = sessionStorage.getItem(TABS_STORAGE_KEY);
     if (raw) {
       const arr = JSON.parse(raw);
       if (Array.isArray(arr)) {
@@ -100,7 +91,6 @@ export default function App() {
   const [tabs, setTabs] = useState<TabItem[]>(loadTabs);
   const [names, setNames] = useState<Record<string, string>>({});
   // 顶栏头像：优先展示用户所选预设头像，否则用昵称/用户名首字母
-  const avatarPreset = useMemo(() => getAvatar(user?.avatar), [user?.avatar]);
   const [pwdOpen, setPwdOpen] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
@@ -145,7 +135,7 @@ export default function App() {
   // 标签栏持久化到 sessionStorage，刷新页面后恢复
   useEffect(() => {
     if (!token) return;
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(tabs));
+    sessionStorage.setItem(TABS_STORAGE_KEY, JSON.stringify(tabs));
   }, [tabs, token]);
 
   if (!token) {
@@ -179,9 +169,7 @@ export default function App() {
   };
 
   const selectedKey =
-    ['/market', '/watchlist', '/portfolio', '/transactions', '/leaderboard', '/profile'].find((k) =>
-      pathname.startsWith(k)
-    ) || '/market';
+    NAV_ORDER.find((k) => pathname.startsWith(k)) || '/market';
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -266,49 +254,20 @@ export default function App() {
               }}
             >
               <Space style={{ cursor: 'pointer' }}>
-                <Avatar style={{ background: avatarPreset?.color || '#0ea5a4' }}>
-                  {avatarPreset
-                    ? avatarPreset.emoji
-                    : (user?.displayName || user?.username || '?').charAt(0).toUpperCase()}
-                </Avatar>
-                <Text>{user?.displayName || user?.username}</Text>
-              </Space>
+              <UserAvatar avatarKey={user?.avatar} name={user?.displayName} username={user?.username} />
+              <Text>{user?.displayName || user?.username}</Text>
+            </Space>
             </Dropdown>
           </Space>
         </Header>
-        <div className="tabbar">
-          <Tabs
-            hideAdd
-            size="small"
-            type="editable-card"
-            activeKey={pathname}
-            items={tabs.map((t) => ({ key: t.key, label: t.label, closable: t.closable }))}
-            onChange={(k) => navigate(k)}
-            onEdit={(e, action) => {
-              if (action === 'remove') removeTab(String(e));
-            }}
-            tabBarExtraContent={{
-              right: (
-                <Dropdown
-                  menu={{
-                    items: [
-                      { key: 'others', label: '关闭其他' },
-                      { key: 'all', label: '关闭全部' },
-                    ],
-                    onClick: ({ key }) => {
-                      if (key === 'others') closeOthers();
-                      else if (key === 'all') closeAll();
-                    },
-                  }}
-                >
-                  <Button size="small" type="text">
-                    标签操作 <DownOutlined />
-                  </Button>
-                </Dropdown>
-              ),
-            }}
-          />
-        </div>
+        <TabBar
+          activeKey={pathname}
+          items={tabs}
+          onChange={(k) => navigate(k)}
+          onRemove={removeTab}
+          onCloseOthers={closeOthers}
+          onCloseAll={closeAll}
+        />
 
         <Content style={{ margin: 16, padding: 0 }}>
           <div className="page-card">

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Card, Table, Select, Button, Empty, Tag, Space } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import { subscribe } from '../ws';
-import { useWatchlist } from '../useWatchlist';
+import { useWatchlist } from '../hooks/useWatchlist';
 import type { StockQuote } from '../types';
 import { formatNum, formatPct, changeClass } from '../utils';
 

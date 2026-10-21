@@ -1,24 +1,19 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Table, Input, Select, Tag, Button, Space, Card, Statistic, Row, Col, Empty } from 'antd';
+import { Table, Input, Select, Tag, Button, Space, Row, Col, Card, Empty } from 'antd';
 import { StarOutlined, StarFilled, SearchOutlined } from '@ant-design/icons';
-import { subscribe } from '../ws';
-import { useWatchlist } from '../useWatchlist';
+import { useWatchlist } from '../hooks/useWatchlist';
+import { useMarket } from '../hooks/useMarket';
+import StatCard from '../components/StatCard';
 import type { StockQuote } from '../types';
-import { formatNum, formatPct, changeClass, formatMoney } from '../utils';
+import { formatNum, formatPct, changeClass } from '../utils';
 
 export default function Market() {
   const navigate = useNavigate();
   const { watch, toggle } = useWatchlist();
-  const [quotes, setQuotes] = useState<StockQuote[]>([]);
+  const { quotes, sectors, summary } = useMarket();
   const [keyword, setKeyword] = useState('');
   const [sector, setSector] = useState<string>('全部');
-
-  useEffect(() => {
-    return subscribe(setQuotes);
-  }, []);
-
-  const sectors = useMemo(() => ['全部', ...Array.from(new Set(quotes.map((q) => q.sector)))], [quotes]);
 
   const filtered = useMemo(() => {
     const k = keyword.trim().toLowerCase();
@@ -28,25 +23,6 @@ export default function Market() {
       return true;
     });
   }, [quotes, keyword, sector]);
-
-  const summary = useMemo(() => {
-    let up = 0;
-    let down = 0;
-    let flat = 0;
-    let idx = 0;
-    let base = 0;
-    for (const q of quotes) {
-      if (q.change > 0) up += 1;
-      else if (q.change < 0) down += 1;
-      else flat += 1;
-      idx += q.price;
-      base += q.prevClose;
-    }
-    const total = quotes.length || 1;
-    return { up, down, flat, indexValue: idx / total, indexPct: base ? ((idx - base) / base) * 100 : 0 };
-  }, [quotes]);
-
-  // 自选股读写走后端接口（useWatchlist 内已做本地兜底）
 
   const columns = [
     {
@@ -114,33 +90,24 @@ export default function Market() {
     <div>
       <Row gutter={16} align="stretch" style={{ marginBottom: 16 }}>
         <Col span={6}>
-          <Card style={{ height: '100%' }}>
-            <Statistic
-              title="模拟大盘"
-              value={formatNum(summary.indexValue)}
-              precision={2}
-              suffix={
-                <span className={changeClass(summary.indexPct)} style={{ fontSize: 13, marginLeft: 6 }}>
-                  {formatPct(summary.indexPct)}
-                </span>
-              }
-            />
-          </Card>
+          <StatCard
+            title="模拟大盘"
+            value={formatNum(summary.indexValue)}
+            suffix={
+              <span className={changeClass(summary.indexPct)} style={{ fontSize: 13, marginLeft: 6 }}>
+                {formatPct(summary.indexPct)}
+              </span>
+            }
+          />
         </Col>
         <Col span={6}>
-          <Card style={{ height: '100%' }}>
-            <Statistic title="上涨" value={summary.up} valueStyle={{ color: '#e0584f' }} />
-          </Card>
+          <StatCard title="上涨" value={summary.up} valueColor="#e0584f" />
         </Col>
         <Col span={6}>
-          <Card style={{ height: '100%' }}>
-            <Statistic title="下跌" value={summary.down} valueStyle={{ color: '#2fa06a' }} />
-          </Card>
+          <StatCard title="下跌" value={summary.down} valueColor="#2fa06a" />
         </Col>
         <Col span={6}>
-          <Card style={{ height: '100%' }}>
-            <Statistic title="平盘" value={summary.flat} valueStyle={{ color: '#8c8c8c' }} />
-          </Card>
+          <StatCard title="平盘" value={summary.flat} valueColor="#8c8c8c" />
         </Col>
       </Row>
 
@@ -154,7 +121,12 @@ export default function Market() {
             onChange={(e) => setKeyword(e.target.value)}
             style={{ width: 220 }}
           />
-          <Select value={sector} onChange={setSector} style={{ width: 160 }} options={sectors.map((s) => ({ label: s, value: s }))} />
+          <Select
+            value={sector}
+            onChange={setSector}
+            style={{ width: 160 }}
+            options={sectors.map((s) => ({ label: s, value: s }))}
+          />
         </Space>
         <Table
           rowKey="code"
