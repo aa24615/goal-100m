@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { availableQty, dateStrOf, shToday } from '../src/routes/trade.js';
+import { availableQty } from '../src/services/tradeService.js';
+import { dateStrOf, shToday } from '../src/utils/time.js';
 
 // 注意：availableQty 依赖 T1_ENABLED 常量（默认开启）。以下用例均在 T+1 开启下验证冻结逻辑。
 // P0：可卖数量直接决定用户能否卖出，算错会导致超卖或无法平仓

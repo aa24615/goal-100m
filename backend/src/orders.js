@@ -1,7 +1,7 @@
 import pool from './db.js';
 import { getDetail } from './market.js';
 import { logger } from './logger.js';
-import { executeTrade } from './routes/trade.js';
+import { executeTrade } from './services/tradeService.js';
 import { calcFees, DAILY_LIMIT } from './fees.js';
 
 /**

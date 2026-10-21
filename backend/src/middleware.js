@@ -96,10 +96,14 @@ export function errorHandler(err, req, res, next) {
   if (clientStatus) {
     logger.warn('请求报文非法(4xx)', meta);
     if (res.headersSent) return next(err);
-    return res.status(clientStatus).json({
-      error: clientStatus === 413 ? '请求体过大' : '请求报文格式错误',
-      requestId: req.id,
-    });
+    const msg = err?.expose
+      ? err.message
+      : clientStatus === 413
+      ? '请求体过大'
+      : '请求报文格式错误';
+    const body = { error: msg, requestId: req.id };
+    if (err?.expose && err.extra) Object.assign(body, err.extra);
+    return res.status(clientStatus).json(body);
   }
 
   logger.error('请求未捕获异常', meta);
