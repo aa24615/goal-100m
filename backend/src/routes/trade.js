@@ -8,12 +8,12 @@ import { calcFees, T1_ENABLED, PRICE_TOLERANCE, DAILY_LIMIT } from '../fees.js';
 
 const router = express.Router();
 
-function shToday(d = new Date()) {
+export function shToday(d = new Date()) {
   return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 // pg 会把 DATE 解析为 Date 对象，统一转成 'YYYY-MM-DD' 再比较
-function dateStrOf(v) {
+export function dateStrOf(v) {
   if (!v) return '';
   if (v instanceof Date) return new Date(v.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
   return String(v).slice(0, 10);

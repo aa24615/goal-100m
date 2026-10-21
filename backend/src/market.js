@@ -63,7 +63,7 @@ function shToday(d = new Date()) {
 }
 
 // 代码稳定散列，用于生成股本（保证每次运行一致）
-function hashOf(code) {
+export function hashOf(code) {
   let h = 0;
   for (let i = 0; i < code.length; i += 1) h = (h * 31 + code.charCodeAt(i)) % 100003;
   return h % 1000;

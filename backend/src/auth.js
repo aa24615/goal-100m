@@ -98,7 +98,7 @@ function userPayload(u) {
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function validateRegister(username, email, password) {
+export function validateRegister(username, email, password) {
   if (!USERNAME_RE.test(username)) {
     return '用户名需为 3-20 位字母、数字或下划线';
   }
