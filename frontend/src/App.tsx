@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, Space, Dropdown, Typography, Modal, Form, Input, App as AntApp } from 'antd';
+import { Layout, Menu, Space, Dropdown, Typography, Modal, Form, Input, Button, App as AntApp } from 'antd';
 import {
   LineChartOutlined,
   StarOutlined,
@@ -25,7 +25,7 @@ import { formatMoney } from './utils';
 import { subscribe } from './ws';
 import UserAvatar from './components/UserAvatar';
 import TabBar from './components/TabBar';
-import { HOME, TABS_TABS_STORAGE_KEY, NAV_ORDER, MENU_LABEL } from './constants';
+import { HOME, TABS_STORAGE_KEY, NAV_ORDER, MENU_LABEL } from './constants';
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;

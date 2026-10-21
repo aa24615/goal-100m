@@ -53,6 +53,8 @@ export default function TradePanel({
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [limitPrice, setLimitPrice] = useState<number | null>(null);
 
+  const price = quote?.price ?? 0;
+
   // 费率与交易规则由后端统一下发，前端不再硬编码
   useEffect(() => {
     api
@@ -81,7 +83,6 @@ export default function TradePanel({
     if (initialQuantity !== undefined) setQty(initialQuantity);
   }, [initialQuantity]);
 
-  const price = quote?.price ?? 0;
   const cash = assets?.cash ?? 0;
 
   const calcFees = (amount: number, type: 'BUY' | 'SELL') => {
