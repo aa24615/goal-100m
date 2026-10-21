@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calcFees, feeConfig, DAILY_LIMIT, MIN_COMMISSION, COMMISSION_RATE, STAMP_RATE, TRANSFER_RATE } from '../src/fees.js';
+import { calcFees, feeConfig, DAILY_LIMIT, MIN_COMMISSION, COMMISSION_RATE, STAMP_RATE, TRANSFER_RATE } from '../../src/fees.js';
 
 // P0：费用计算是交易链路的正确性地基，错误会直接导致用户资产算错
 test('P0 买入费用 = 佣金(最低5元) + 过户费，不含印花税', () => {

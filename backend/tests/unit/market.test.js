@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sharesOf, hashOf } from '../src/market.js';
+import { sharesOf, hashOf } from '../../src/market.js';
 
 // P1：股本估算用于市值加权与成交量，必须确定且落在合理区间
 test('P1 sharesOf 对同一代码确定性一致', () => {

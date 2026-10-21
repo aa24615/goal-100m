@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateRegister } from '../src/auth.js';
+import { validateRegister } from '../../src/auth.js';
 
 // P0：注册校验是账户安全的第一道闸门，必须拒绝不合规输入
 test('P0 合法用户名/邮箱/密码通过校验', () => {
