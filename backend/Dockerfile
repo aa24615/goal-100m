@@ -6,6 +6,7 @@ WORKDIR /app
 COPY package.json ./
 COPY node_modules ./node_modules
 COPY src ./src
+COPY migrations ./migrations
 
 EXPOSE 3001
 CMD ["node", "src/index.js"]

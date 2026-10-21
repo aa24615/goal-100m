@@ -9,35 +9,6 @@ import { logger } from './logger.js';
 
 const SNAPSHOT_MS = Number(process.env.SNAPSHOT_MS || 60000); // 默认每分钟一次
 
-export async function ensureSnapshotTable() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS asset_snapshots (
-      id            BIGSERIAL PRIMARY KEY,
-      user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      total_assets  NUMERIC(18,2) NOT NULL,
-      cash          NUMERIC(18,2) NOT NULL,
-      market_value  NUMERIC(18,2) NOT NULL,
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
-  await pool.query(
-    'CREATE INDEX IF NOT EXISTS idx_snapshots_user_time ON asset_snapshots(user_id, created_at DESC)'
-  );
-  // 保留略长于一年，够年榜取基准，同时避免表无限增长
-  await pool.query("DELETE FROM asset_snapshots WHERE created_at < now() - interval '400 days'");
-
-  // 大盘指数快照：与用户净值同口径，用于计算「超越大盘」的超额收益
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS index_snapshots (
-      id          BIGSERIAL PRIMARY KEY,
-      index_value NUMERIC(18,4) NOT NULL,
-      index_pct   NUMERIC(12,4) NOT NULL,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
-  await pool.query("DELETE FROM index_snapshots WHERE created_at < now() - interval '400 days'");
-}
-
 /** 记录一次大盘指数快照（与用户资产快照同频） */
 export async function snapshotIndex() {
   const s = getSummary();
@@ -93,6 +64,9 @@ export async function snapshotAll() {
 export function startSnapshots() {
   const run = async () => {
     try {
+      // 清理 400 天前的快照，避免表无限增长（保留略长于一年，够年榜取基准）
+      await pool.query("DELETE FROM asset_snapshots WHERE created_at < now() - interval '400 days'");
+      await pool.query("DELETE FROM index_snapshots WHERE created_at < now() - interval '400 days'");
       const n = await snapshotAll();
       await snapshotIndex();
       if (n > 0) logger.debug('资产快照已记录', { users: n });

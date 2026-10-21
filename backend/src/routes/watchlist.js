@@ -6,19 +6,6 @@ import { asyncHandler } from '../middleware.js';
 
 const router = express.Router();
 
-// 自选股持久化：此前只存 localStorage，跨设备/清缓存即丢失
-export async function ensureWatchlistSchema() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS watchlist (
-      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      stock_code VARCHAR(10) NOT NULL,
-      sort       INTEGER NOT NULL DEFAULT 0,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (user_id, stock_code)
-    );
-  `);
-}
-
 router.get(
   '/watchlist',
   authMiddleware,

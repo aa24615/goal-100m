@@ -11,27 +11,6 @@ import { calcFees, DAILY_LIMIT } from './fees.js';
  * - 成交复用 executeTrade，与市价单共用资金校验、T+1、费用与盈亏逻辑
  */
 
-export async function ensureOrdersSchema() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS orders (
-      id          BIGSERIAL PRIMARY KEY,
-      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      stock_code  VARCHAR(10) NOT NULL,
-      stock_name  VARCHAR(40) NOT NULL,
-      side        VARCHAR(4) NOT NULL,
-      limit_price NUMERIC(12,2) NOT NULL,
-      quantity    INTEGER NOT NULL,
-      status      VARCHAR(10) NOT NULL DEFAULT 'PENDING',
-      filled_price NUMERIC(12,2),
-      note        TEXT,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_pending ON orders(status, stock_code)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at DESC)');
-}
-
 function shToday(d = new Date()) {
   return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }

@@ -19,15 +19,6 @@ function dateStrOf(v) {
   return String(v).slice(0, 10);
 }
 
-// 表结构幂等升级（兼容已有数据库）
-export async function ensureTradeSchema() {
-  await pool.query('ALTER TABLE holdings ADD COLUMN IF NOT EXISTS t1_qty INTEGER NOT NULL DEFAULT 0');
-  await pool.query('ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_buy_date DATE');
-  await pool.query('ALTER TABLE transactions ADD COLUMN IF NOT EXISTS realized_pnl NUMERIC(18,2)');
-  await pool.query('ALTER TABLE transactions ADD COLUMN IF NOT EXISTS cash_after NUMERIC(18,2)');
-  await pool.query('ALTER TABLE transactions ADD COLUMN IF NOT EXISTS holding_qty_after INTEGER');
-}
-
 // 可卖数量：T+1 下当日买入部分冻结
 export function availableQty(row) {
   const qty = row.quantity;

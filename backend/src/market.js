@@ -74,34 +74,8 @@ export function sharesOf(code, prevClose) {
   return Math.round(marketCap / prevClose / 1e4) * 1e4; // 取整到万股
 }
 
-// ---------- 表结构（幂等，兼容已有数据库） ----------
-export async function ensureMarketSchema() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS stock_daily (
-      code       VARCHAR(10) NOT NULL REFERENCES stocks(code) ON DELETE CASCADE,
-      seq        INTEGER NOT NULL,
-      trade_date DATE NOT NULL,
-      open       NUMERIC(12,2) NOT NULL,
-      high       NUMERIC(12,2) NOT NULL,
-      low        NUMERIC(12,2) NOT NULL,
-      close      NUMERIC(12,2) NOT NULL,
-      volume     BIGINT NOT NULL DEFAULT 0,
-      amount     NUMERIC(18,2) NOT NULL DEFAULT 0,
-      prev_close NUMERIC(12,2) NOT NULL DEFAULT 0,
-      PRIMARY KEY (code, seq)
-    );
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS market_meta (
-      k TEXT PRIMARY KEY,
-      v TEXT NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
-  await pool.query('ALTER TABLE stocks ADD COLUMN IF NOT EXISTS shares BIGINT');
-  await pool.query('ALTER TABLE stocks ADD COLUMN IF NOT EXISTS day_amount NUMERIC(18,2) NOT NULL DEFAULT 0');
-
-  // 回填股本
+// 股本回填：seed 阶段若未写入 shares，则按市值估算补全（仅数据，不涉及表结构）
+export async function backfillStockShares() {
   const r = await pool.query('SELECT code, price, prev_close, shares FROM stocks');
   for (const row of r.rows) {
     if (row.shares) continue;
@@ -138,7 +112,7 @@ async function saveMeta() {
 
 // ---------- 加载：从 DB 恢复，不重新随机生成 ----------
 export async function loadMarket() {
-  await ensureMarketSchema();
+  await backfillStockShares();
   await loadMeta();
 
   const { rows } = await pool.query('SELECT * FROM stocks ORDER BY code');

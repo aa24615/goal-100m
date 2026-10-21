@@ -64,35 +64,6 @@ export function verifyToken(token) {
 const norm = (v) => String(v || '').trim().toLowerCase();
 
 // 用户名与邮箱大小写归一化（配合表达式唯一索引）
-export async function ensureAuthSchema() {
-  try {
-    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username_lower ON users (lower(username))');
-    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_users_email_lower ON users (lower(email))');
-  } catch (e) {
-    logger.warn('大小写唯一索引创建失败（可能已存在大小写重复账号）', { err: e.message });
-  }
-}
-
-// 个人资料扩展字段：昵称 display_name 与头像 avatar（预设 key）。幂等追加，兼容已有库。
-export async function ensureProfileSchema() {
-  const cols = [
-    'ALTER TABLE users ADD COLUMN display_name VARCHAR(40)',
-    'ALTER TABLE users ADD COLUMN avatar VARCHAR(20)',
-  ];
-  for (const sql of cols) {
-    try {
-      await pool.query(sql);
-    } catch (e) {
-      // 42701 = 字段已存在，属正常情况
-      if (e?.code !== '42701') {
-        logger.error('用户资料扩展字段初始化失败', { err: e });
-        throw e;
-      }
-    }
-  }
-  logger.info('用户资料扩展字段已就绪(display_name/avatar)');
-}
-
 // 头像预设 key 白名单（前端对应渲染 emoji + 配色）
 const AVATAR_KEYS = new Set([
   'none',
