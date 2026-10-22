@@ -10,8 +10,8 @@ import { shToday } from '../utils/time.js';
 import { track } from './analyticsService.js';
 
 export const GUIDE_STEPS = [
-  { step: 1, key: 'market', title: '看懂行情', desc: '列表里是 28 只虚拟标的，涨用红、跌用绿，点任意一只可以看分时走势。' },
-  { step: 2, key: 'order', title: '下一笔单', desc: '进入个股页，在交易面板输入数量买入。买入数量需为 100 的整数倍。' },
+  { step: 1, key: 'market', title: '看懂行情', desc: '列表里是全市场真实 A 股标的与真实行情，涨用红、跌用绿，点任意一只可以看分时走势。' },
+  { step: 2, key: 'order', title: '下一笔单', desc: '进入个股页，在交易面板输入数量买入。买入数量需为 100 的整数倍（科创板 200 股起）。' },
   { step: 3, key: 'rules', title: '理解 T+1 与涨跌停', desc: '当日买入的股份次日才能卖出；价格相对昨收 ±10% 即涨跌停，涨停不能买、跌停不能卖。' },
   { step: 4, key: 'pnl', title: '看懂盈亏', desc: '持仓页显示浮动盈亏；卖出后进入「复盘战绩」可以看到这一笔赚了多少、持有了多久。' },
 ];

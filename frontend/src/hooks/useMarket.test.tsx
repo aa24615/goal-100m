@@ -15,8 +15,15 @@ vi.mock('../ws', () => ({
   }),
 }));
 
+// 大盘汇总走后端接口；这里 mock 成失败以验证前端兜底派生
+vi.mock('../api', () => ({
+  default: {
+    get: vi.fn(() => Promise.reject(new Error('skip'))),
+  },
+}));
+
 describe('useMarket (P3)', () => {
-  it('订阅行情并派生大盘汇总', () => {
+  it('订阅行情；汇总接口失败时用可见报价做等权兜底派生', async () => {
     const { result } = renderHook(() => useMarket());
     expect(result.current.quotes.length).toBe(3);
     expect(result.current.summary.up).toBe(1);

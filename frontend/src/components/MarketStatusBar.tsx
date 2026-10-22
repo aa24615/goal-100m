@@ -31,20 +31,25 @@ export default function MarketStatusBar({
   const perTick = tickMinutes ?? 2;
   const remainMin = Math.max(0, Math.ceil((status.ticksToClose * perTick) / 60));
 
+  const phaseText = PHASE_TEXT[status.phase] || status.phase;
+  // 压缩模式下给出 tick 倒计时；真实时钟模式按自然时段开市，无需倒计时
+  const schedule = open
+    ? status.realClock
+      ? ' · 交易时段 9:30-11:30 / 13:00-15:00'
+      : ` · 距收盘约 ${status.ticksToClose} 个 tick（≈${remainMin} 分钟）`
+    : status.realClock
+      ? ' · 休市中，下一交易时段开盘后价格随真实行情变动'
+      : ' · 休市中，下一次开盘后价格继续变动';
+
   return (
     <Space size={8} wrap>
       <Tag color={color} icon={<FieldTimeOutlined />} data-testid="market-phase">
-        {PHASE_TEXT[status.phase] || status.phase}
+        {phaseText}
       </Tag>
-      <Tooltip title="虚拟行情的交易日序号，收盘结算后自动进入下一交易日">
-        <Tag>第 {status.tradeSeq} 个交易日</Tag>
+      <Tooltip title={`交易日序号 ${status.tradeSeq}（收盘结算后自动进入下一交易日）`}>
+        <Tag>交易日 {status.tradeDate}</Tag>
       </Tooltip>
-      <span style={{ fontSize: 12, color: '#8c8c8c' }}>
-        {status.tradeDate}
-        {open
-          ? ` · 距收盘约 ${status.ticksToClose} 个 tick（≈${remainMin} 分钟）`
-          : ' · 休市中，下一次开盘后价格继续变动'}
-      </span>
+      <span style={{ fontSize: 12, color: '#8c8c8c' }}>{schedule}</span>
     </Space>
   );
 }

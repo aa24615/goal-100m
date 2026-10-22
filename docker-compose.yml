@@ -35,8 +35,8 @@ services:
       GAP_SIGMA: ${GAP_SIGMA:-0.015}
       INTRADAY_VOL: ${INTRADAY_VOL:-0.0012}
       PERSIST_EVERY_TICKS: ${PERSIST_EVERY_TICKS:-5}
-      # 设为 1 则按真实时钟 9:30-11:30 / 13:00-15:00 开市（演示压缩模式请保持 0）
-      REAL_CLOCK: ${REAL_CLOCK:-0}
+      # 设为 1 则按真实时钟 9:30-11:30 / 13:00-15:00 开市（真实行情数据的推荐模式）
+      REAL_CLOCK: ${REAL_CLOCK:-1}
       # T+1 当日买入不可卖（设为 0 关闭）
       T1_ENABLED: ${T1_ENABLED:-1}
       PRICE_TOLERANCE: ${PRICE_TOLERANCE:-0.005}

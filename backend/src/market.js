@@ -163,10 +163,19 @@ export async function loadMarket() {
     [meta.seq]
   );
   const dmap = new Map(daily.rows.map((r) => [r.code, r]));
+  // 昨收以「上一交易日的真实收盘价」为准。
+  // stocks.prev_close 可能停留在更早的日期（历史遗留/异常中断），直接采信会让涨跌幅算错。
+  const prevDaily = await pool.query('SELECT code, close FROM stock_daily WHERE seq = $1', [
+    meta.seq - 1,
+  ]);
+  const pmap = new Map(prevDaily.rows.map((r) => [r.code, Number(r.close)]));
+  if (pmap.size > 0) {
+    logger.info('昨收取自上一交易日收盘', { seq: meta.seq - 1, count: pmap.size });
+  }
   const now = Date.now();
 
   for (const r of rows) {
-    const prevClose = Number(r.prev_close);
+    const prevClose = pmap.get(r.code) || Number(r.prev_close) || 0;
     const d = dmap.get(r.code);
     let open;
     let price;
@@ -323,6 +332,12 @@ async function seqForDate(d) {
 async function ensureTradingDay() {
   const today = shToday();
   if (meta.tradeDate === today) return;
+
+  // 盘前 / 休市（含周末、节假日）：沿用最近一个已收盘交易日的行情。
+  // 若此时把昨收滚成当前价，所有标的涨跌幅会被抹平成 0，盘前就看不到昨日真实涨跌。
+  // 仅真实时钟模式下受交易时段约束；压缩模式保持按自然日推进。
+  if (REAL_CLOCK && !inTradingWindow(new Date())) return;
+
   for (const s of state.values()) {
     s.prevClose = s.price;
     s.volume = 0;
@@ -338,6 +353,11 @@ async function ensureTradingDay() {
 
 export function tick() {
   const now = Date.now();
+
+  // 真实时钟模式：交易时段之外引擎不处于「交易中」，前端状态栏据此展示已收盘/休市
+  if (REAL_CLOCK) {
+    meta.phase = inTradingWindow(new Date(now)) ? 'TRADING' : 'CLOSED';
+  }
 
   // 只有拿到「新的」真实快照才更新，避免同一份数据被反复广播
   const qAt = getLastFetchAt();

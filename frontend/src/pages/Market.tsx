@@ -91,7 +91,7 @@ export default function Market() {
       <Row gutter={16} align="stretch" style={{ marginBottom: 16 }}>
         <Col span={6}>
           <StatCard
-            title="模拟大盘"
+            title="大盘指数"
             value={formatNum(summary.indexValue)}
             suffix={
               <span className={changeClass(summary.indexPct)} style={{ fontSize: 13, marginLeft: 6 }}>

@@ -15,10 +15,10 @@ const base = {
 };
 
 describe('MarketStatusBar (RQ-27)', () => {
-  it('交易中展示交易日序号与距收盘信息', () => {
+  it('交易中展示交易日与距收盘信息', () => {
     render(<MarketStatusBar status={base} />);
     expect(screen.getByTestId('market-phase').textContent).toContain('交易中');
-    expect(screen.getByText(/第 42 个交易日/)).toBeInTheDocument();
+    expect(screen.getByText(/交易日 2026-10-22/)).toBeInTheDocument();
     expect(screen.getByText(/距收盘/)).toBeInTheDocument();
   });
 

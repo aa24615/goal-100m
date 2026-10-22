@@ -12,8 +12,8 @@ describe('StatCard (P2)', () => {
   });
 
   it('字符串数值（如已格式化的大盘指数）按原样展示', () => {
-    const { container } = render(<StatCard title="模拟大盘" value="3,245.67" />);
-    expect(screen.getByText('模拟大盘')).toBeInTheDocument();
+    const { container } = render(<StatCard title="大盘指数" value="3,245.67" />);
+    expect(screen.getByText('大盘指数')).toBeInTheDocument();
     expect(container.querySelector('.ant-statistic-content')?.textContent).toContain('3,245.67');
   });
 
