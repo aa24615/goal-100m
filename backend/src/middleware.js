@@ -23,10 +23,39 @@ function redact(value) {
   return out;
 }
 
+// index.js 已 app.set('trust proxy', 1)，Express 会按「受信任跳数」从 X-Forwarded-For
+// 右侧回推出真实客户端 IP；直接取列表首位会把伪造报文的前缀当成来源。
 function clientIp(req) {
-  // index.js 已 app.set('trust proxy', 1)，Express 会按「受信任跳数」从 X-Forwarded-For
-  // 右侧回推出真实客户端 IP；直接取列表首位会把伪造报文的前缀当成来源。
   return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+// 受信任的反向代理跳数，必须与 index.js 的 app.set('trust proxy', N) 保持一致
+export const TRUST_PROXY_HOPS = 1;
+
+/**
+ * 为「未经 Express 中间件」的请求解析客户端 IP（如 WebSocket upgrade）。
+ *
+ * 背景：WebSocketServer 直接挂在原生 http.Server 上，upgrade 回调里的 req 是
+ * 原生 IncomingMessage —— 没有经过 Express，app.set('trust proxy') 不生效、
+ * req.ip 恒为 undefined。此前直接取 req.socket.remoteAddress，拿到的永远是
+ * nginx 容器地址（日志中 8600+ 条 WebSocket 鉴权失败记录的 ip 全为
+ * ::ffff:192.168.96.4），完全丧失追溯能力。
+ *
+ * 算法与 Express/proxy-addr 的 trust proxy = N 完全等价：
+ * XFF 列表自左(客户端)向右(最近一跳代理)排列，取 index = min(len - 1, N)。
+ * 这样 HTTP 与 WebSocket 两条链路的安全语义一致，不会被伪造前缀欺骗。
+ */
+export function proxyClientIp(req, hops = TRUST_PROXY_HOPS) {
+  const raw = req?.headers?.['x-forwarded-for'];
+  if (typeof raw === 'string' && raw.trim()) {
+    const list = raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (list.length > 0) return list[Math.min(list.length - 1, hops)];
+  }
+  // 无 XFF：说明反向代理未转发该头，退化为直连对端地址
+  return req?.socket?.remoteAddress || 'unknown';
 }
 
 export function requestLogger(req, res, next) {
@@ -109,6 +138,18 @@ export function errorHandler(err, req, res, next) {
   logger.error('请求未捕获异常', meta);
   if (res.headersSent) return next(err);
   res.status(500).json({ error: '服务器内部错误', requestId: req.id });
+}
+
+/**
+ * 构造「业务错误」：带 HTTP 状态码且允许把 message 透传给前端。
+ * 统一在此构造，避免各 service 各自造轮子导致 expose 语义不一致。
+ */
+export function businessError(message, status = 400, extra) {
+  const e = new Error(message);
+  e.status = status;
+  e.extra = extra || {};
+  e.expose = true;
+  return e;
 }
 
 export function asyncHandler(fn) {

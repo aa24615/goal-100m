@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "migrate": "node src/scripts/migrate.js",
+    "sync:market": "node src/scripts/syncMarket.js",
     "test": "node --test tests/unit/*.test.js",
     "test:integration": "node --test --test-concurrency=1 --import ./tests/integration/presets.js tests/integration/*.test.js",
     "test:all": "node --test --test-concurrency=1 --import ./tests/integration/presets.js tests/unit/*.test.js tests/integration/*.test.js"

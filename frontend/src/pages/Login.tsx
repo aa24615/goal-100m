@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Card, Tabs, Form, Input, Button, Typography, App, Divider } from 'antd';
 import { useAuth } from '../auth';
+import Forgot from './Forgot';
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -10,6 +11,10 @@ export default function Login() {
   // 登录与注册各自独立的 loading 状态，避免互相干扰
   const [loginLoading, setLoginLoading] = useState(false);
   const [registerLoading, setRegisterLoading] = useState(false);
+  // RQ-30：密码找回入口（此前忘记密码只能弃号重开）
+  const [forgot, setForgot] = useState(false);
+
+  if (forgot) return <Forgot />;
 
   const onLogin = async (values: any) => {
     setLoginLoading(true);
@@ -127,6 +132,12 @@ export default function Login() {
                       <Button type="primary" htmlType="submit" block size="large" loading={loginLoading}>
                         登录
                       </Button>
+                      {/* RQ-30：忘记密码不再是死路 */}
+                      <div style={{ textAlign: 'right', marginTop: 8 }}>
+                        <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setForgot(true)} data-testid="goto-forgot">
+                          忘记密码？
+                        </Button>
+                      </div>
                     </Form>
                   ),
                 },

@@ -1,6 +1,7 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { randomBytes, createHash } from 'node:crypto';
 import pool from './db.js';
 import { logger } from './logger.js';
 import { asyncHandler } from './middleware.js';
@@ -9,12 +10,24 @@ const router = express.Router();
 const INITIAL_CAPITAL = 1000000; // 初始虚拟资金 ¥1,000,000
 
 // JWT 密钥：生产环境禁止使用默认密钥，启动时直接失败，避免被自签 token
+// 公开样例 / 占位密钥黑名单：与「未设置」同等对待。
+// 此前只识别 dev-secret-change-me，而 docker-compose 与 .env.example 里的默认值是
+// please-change-this-secret —— 这个公开字符串能静默绕过生产环境的强校验。
+const PLACEHOLDER_SECRETS = new Set([
+  'dev-secret-change-me',
+  'please-change-this-secret',
+  'your-secret-key',
+  'change-me',
+  'changeme',
+  'secret',
+]);
+
 function resolveSecret() {
   const s = process.env.JWT_SECRET;
   const isProd = process.env.NODE_ENV === 'production';
-  if (!s || s === 'dev-secret-change-me') {
+  if (!s || PLACEHOLDER_SECRETS.has(s)) {
     if (isProd) {
-      throw new Error('FATAL: 生产环境必须设置 JWT_SECRET 环境变量（禁止使用默认密钥）');
+      throw new Error('FATAL: 生产环境必须设置 JWT_SECRET 环境变量（禁止使用默认/占位密钥）');
     }
     logger.warn('当前使用默认 JWT 密钥，仅允许在开发环境使用', { env: process.env.NODE_ENV });
     return 'dev-secret-change-me';
@@ -44,6 +57,22 @@ export function authMiddleware(req, res, next) {
     });
     return res.status(401).json({ error: '登录已过期，请重新登录' });
   }
+}
+
+/**
+ * 可选鉴权：带了合法 token 就解析出 req.userId，没带或 token 失效则按游客放行。
+ *
+ * 用于「匿名也能看、登录了能看到更多」的接口（如排行榜需要钉住「我的排名」）。
+ * 与 authMiddleware 的区别：这里绝不返回 401，过期 token 只降级为游客，
+ * 避免把「登录态过期」变成「页面报错」。
+ */
+export function optionalAuth(req, _res, next) {
+  const h = req.headers.authorization;
+  if (h && h.startsWith('Bearer ')) {
+    const uid = verifyToken(h.slice(7));
+    if (uid) req.userId = uid;
+  }
+  next();
 }
 
 function signToken(userId) {
@@ -276,15 +305,225 @@ router.post(
   })
 );
 
-// 重置模拟账户：清空持仓与交易记录，资金恢复初始，保留账号与身份
+/* ---------------- RQ-33 偏好：深色模式 / 信息密度 ---------------- */
+
+const THEMES = new Set(['light', 'dark']);
+const DENSITIES = new Set(['compact', 'normal', 'loose']);
+
+router.get(
+  '/profile/preferences',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const { rows } = await pool.query(
+      'SELECT theme, density FROM user_preferences WHERE user_id=$1',
+      [req.userId]
+    );
+    res.json(rows[0] || { theme: 'light', density: 'normal' });
+  })
+);
+
+router.put(
+  '/profile/preferences',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const theme = THEMES.has(req.body?.theme) ? req.body.theme : null;
+    const density = DENSITIES.has(req.body?.density) ? req.body.density : null;
+    if (!theme && !density) return res.status(400).json({ error: '没有可更新的偏好项' });
+    const { rows } = await pool.query(
+      `INSERT INTO user_preferences (user_id, theme, density)
+       VALUES ($1, COALESCE($2,'light'), COALESCE($3,'normal'))
+       ON CONFLICT (user_id) DO UPDATE SET
+         theme = COALESCE($2, user_preferences.theme),
+         density = COALESCE($3, user_preferences.density),
+         updated_at = now()
+       RETURNING theme, density`,
+      [req.userId, theme, density]
+    );
+    res.json(rows[0]);
+  })
+);
+
+/* ---------------- RQ-30 密码找回（邮箱验证） ---------------- */
+
+const RESET_TOKEN_TTL_MIN = Number(process.env.RESET_TOKEN_TTL_MIN || 30);
+const SMTP_HOST = process.env.SMTP_HOST || '';
+// 无 SMTP 时的兜底：仅允许非生产环境把重置令牌直接回给调用方，生产环境一律不返回
+const RESET_DEV_ECHO = process.env.NODE_ENV !== 'production';
+
+function hashToken(raw) {
+  return createHash('sha256').update(String(raw)).digest('hex');
+}
+
+async function sendResetEmail(to, link) {
+  if (!SMTP_HOST) return { sent: false, reason: 'SMTP 未配置' };
+  try {
+    const nodemailer = await import('nodemailer');
+    const t = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 465),
+      secure: process.env.SMTP_SECURE !== '0',
+      auth: process.env.SMTP_USER
+        ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+        : undefined,
+    });
+    await t.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@example.com',
+      to,
+      subject: '重置你的模拟交易账户密码',
+      text: `请在 ${RESET_TOKEN_TTL_MIN} 分钟内打开以下链接完成密码重置：\n${link}\n\n若非本人操作请忽略此邮件。`,
+    });
+    return { sent: true };
+  } catch (e) {
+    logger.error('密码重置邮件发送失败', { to, err: e });
+    return { sent: false, reason: '邮件服务不可用' };
+  }
+}
+
+/**
+ * 申请密码重置。
+ * 防滥用：① 复用登录/注册限流；② 令牌 30 分钟有效且一次性；
+ *         ③ 无论邮箱是否注册都返回同一句提示，不泄露账号存在性。
+ */
+router.post(
+  '/auth/forgot',
+  asyncHandler(async (req, res) => {
+    const email = norm(req.body?.email);
+    if (!email) return res.status(400).json({ error: '请填写注册邮箱' });
+    const generic = { ok: true, message: '若该邮箱已注册，重置链接已发送，请注意查收' };
+
+    const { rows } = await pool.query('SELECT id, email FROM users WHERE lower(email)=$1', [email]);
+    if (rows.length === 0) {
+      logger.info('密码找回请求（邮箱未注册，按统一提示返回）', { ip: req.ip });
+      return res.json(generic);
+    }
+    const user = rows[0];
+    const raw = randomBytes(24).toString('hex');
+    const expires = new Date(Date.now() + RESET_TOKEN_TTL_MIN * 60000);
+    await pool.query(
+      'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1,$2,$3)',
+      [user.id, hashToken(raw), expires]
+    );
+    const link = `${process.env.APP_BASE_URL || ''}/reset?token=${raw}`;
+    const mail = await sendResetEmail(user.email, link);
+    logger.info('密码重置令牌已签发', { userId: user.id, mail });
+
+    // 无 SMTP 且非生产环境：把令牌直接回给调用方，便于本地/测试环境走通流程
+    if (!mail.sent && RESET_DEV_ECHO) {
+      return res.json({ ...generic, devToken: raw, devLink: link, notice: 'SMTP 未配置，已在开发环境直接返回令牌' });
+    }
+    return res.json(generic);
+  })
+);
+
+router.post(
+  '/auth/reset',
+  asyncHandler(async (req, res) => {
+    const { token, password } = req.body || {};
+    if (!token || !password) return res.status(400).json({ error: '请填写令牌与新密码' });
+    const invalid = validateRegister('resetuser', 'reset@example.com', password);
+    if (invalid) return res.status(400).json({ error: `新密码不合规：${invalid}` });
+
+    const { rows } = await pool.query(
+      'SELECT * FROM password_reset_tokens WHERE token_hash=$1',
+      [hashToken(token)]
+    );
+    const rec = rows[0];
+    if (!rec) return res.status(400).json({ error: '重置链接无效' });
+    if (rec.used_at) return res.status(400).json({ error: '重置链接已被使用' });
+    if (new Date(rec.expires_at).getTime() < Date.now()) {
+      return res.status(400).json({ error: '重置链接已过期，请重新申请' });
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, rec.user_id]);
+      await client.query('UPDATE password_reset_tokens SET used_at=now() WHERE id=$1', [rec.id]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+    logger.info('密码重置成功', { userId: rec.user_id });
+    res.json({ ok: true });
+  })
+);
+
+/* ---------------- RQ-34 账户重置：二次确认 + 冷却 + 留痕 ---------------- */
+
+const RESET_COOLDOWN_HOURS = Number(process.env.RESET_COOLDOWN_HOURS || 24);
+const RESET_CONFIRM_TEXT = '确认重置';
+
+async function resetCooldownLeft(uid) {
+  const { rows } = await pool.query(
+    'SELECT created_at FROM account_resets WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',
+    [uid]
+  );
+  if (rows.length === 0) return 0;
+  const passed = (Date.now() - new Date(rows[0].created_at).getTime()) / 3600000;
+  return Math.max(0, Math.ceil(RESET_COOLDOWN_HOURS - passed));
+}
+
+/** 重置前的确认信息（供前端弹窗显示冷却与影响），不产生副作用 */
+router.get(
+  '/account/reset/notice',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const left = await resetCooldownLeft(req.userId);
+    const { rows } = await pool.query(
+      'SELECT COUNT(*)::int AS c FROM account_resets WHERE user_id=$1',
+      [req.userId]
+    );
+    const me = await pool.query(
+      'SELECT cash, initial_capital FROM users WHERE id=$1',
+      [req.userId]
+    );
+    res.json({
+      cooldownHours: RESET_COOLDOWN_HOURS,
+      cooldownLeftHours: left,
+      canReset: left === 0,
+      resetCount: rows[0]?.c || 0,
+      currentCash: me.rows[0] ? Number(me.rows[0].cash) : 0,
+      confirmText: RESET_CONFIRM_TEXT,
+      impact: ['清空全部持仓', '清空交易记录与净值快照', '资金恢复为初始金额', '重置记录会在战绩与排行榜中标注'],
+    });
+  })
+);
+
 router.post(
   '/account/reset',
   authMiddleware,
   asyncHandler(async (req, res) => {
     const uid = req.userId;
+    // 二次确认：必须显式传入确认文案，杜绝误触一键清空
+    if (String(req.body?.confirm || '').trim() !== RESET_CONFIRM_TEXT) {
+      logger.warn('重置账户失败: 未通过二次确认', { userId: uid });
+      return res.status(400).json({ error: `请在请求中携带确认文案「${RESET_CONFIRM_TEXT}」` });
+    }
+    const left = await resetCooldownLeft(uid);
+    if (left > 0) {
+      logger.warn('重置账户失败: 处于冷却期', { userId: uid, leftHours: left });
+      return res.status(429).json({ error: `账户重置冷却中，请 ${left} 小时后再试` });
+    }
+
     const client = await pool.connect();
+    let assetsBefore = 0;
+    let resetCount = 1;
     try {
       await client.query('BEGIN');
+      const u = await client.query('SELECT cash FROM users WHERE id=$1 FOR UPDATE', [uid]);
+      const h = await client.query('SELECT * FROM holdings WHERE user_id=$1', [uid]);
+      // 用成本价兜底估值，避免依赖行情模块造成循环依赖
+      assetsBefore = Number(u.rows[0]?.cash || 0) + h.rows.reduce((s, r) => s + r.quantity * Number(r.avg_cost), 0);
+      const cnt = await client.query(
+        'SELECT COALESCE(MAX(reset_count),0)::int AS c FROM account_resets WHERE user_id=$1',
+        [uid]
+      );
+      resetCount = (cnt.rows[0]?.c || 0) + 1;
+
       await client.query('DELETE FROM holdings WHERE user_id=$1', [uid]);
       await client.query('DELETE FROM transactions WHERE user_id=$1', [uid]);
       await client.query('DELETE FROM asset_snapshots WHERE user_id=$1', [uid]);
@@ -292,6 +531,10 @@ router.post(
         INITIAL_CAPITAL,
         uid,
       ]);
+      await client.query(
+        'INSERT INTO account_resets (user_id, assets_before, reset_count) VALUES ($1,$2,$3)',
+        [uid, Math.round(assetsBefore * 100) / 100, resetCount]
+      );
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK').catch(() => {});
@@ -300,8 +543,8 @@ router.post(
     } finally {
       client.release();
     }
-    logger.info('重置模拟账户成功', { userId: uid, capital: INITIAL_CAPITAL });
-    res.json({ ok: true, cash: INITIAL_CAPITAL });
+    logger.info('重置模拟账户成功', { userId: uid, capital: INITIAL_CAPITAL, resetCount });
+    res.json({ ok: true, cash: INITIAL_CAPITAL, resetCount, assetsBefore: Math.round(assetsBefore * 100) / 100 });
   })
 );
 

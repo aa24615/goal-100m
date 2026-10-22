@@ -8,6 +8,7 @@ import { runMigrations } from '../../src/migrate.js';
 import { seedStocks } from '../../src/seed.js';
 import { loadMarket } from '../../src/market.js';
 import { createOrder, matchOrders, listOrders } from '../../src/orders.js';
+import { resetDb } from './resetDb.js';
 
 let server;
 let base;
@@ -22,6 +23,8 @@ async function setup() {
   if (ex.rows.length === 0) await admin.query('CREATE DATABASE papertrade_test');
   await admin.end();
 
+  // 先清空测试库，避免上一轮遗留数据影响本轮断言（尤其是排行榜 TOP_N 截断）
+  await resetDb(pool);
   await runMigrations(pool);
   await seedStocks();
   await loadMarket();
@@ -68,6 +71,19 @@ const j = async (r) => {
   } catch {
     return t;
   }
+};
+
+/** 统一请求封装：token 可选（不传即游客），query 自动拼到 URL 上 */
+const call = (path, { method = 'GET', token, body, query } = {}) => {
+  const qs = query ? `?${new URLSearchParams(query).toString()}` : '';
+  return fetch(`${base}${path}${qs}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
 };
 
 // ---------- P0：注册 / 登录 / 鉴权 ----------
@@ -177,13 +193,22 @@ test('P1 报价偏离过大被拒（409）', async () => {
 
 // ---------- P2：排行榜包含本用户 ----------
 test('P2 排行榜包含本用户并带超额收益列', async () => {
-  const res = await fetch(`${base}/leaderboard?period=all`);
+  // 带登录态请求：即便名次在 TOP_N 之外，也应钉住「我的排名」
+  const res = await call('/leaderboard', { token: auth.token, query: { period: 'all' } });
   const data = await j(res);
   assert.ok(Array.isArray(data));
   const me = data.find((x) => x.username === auth.username);
   assert.ok(me, '排行榜应包含本用户');
   assert.ok('excessPct' in me);
   assert.ok('returnPct' in me);
+  assert.ok('rank' in me);
+});
+
+test('P2 游客访问排行榜不下发任何人身份信息', async () => {
+  const data = await j(await fetch(`${base}/leaderboard?period=all`));
+  assert.ok(Array.isArray(data));
+  assert.ok(data.length > 0);
+  for (const row of data) assert.equal(row.isSelf, undefined);
 });
 
 // ---------- P2：资产曲线结构正确 ----------
@@ -241,15 +266,28 @@ test('P3 无效头像被拒', async () => {
   assert.equal(res.status, 400);
 });
 
-// ---------- P3：重置账户 ----------
+// ---------- P3：重置账户（RQ-34：二次确认 + 冷却 + 留痕） ----------
+test('P3 未携带确认文案时重置被拒（二次确认生效）', async () => {
+  const res = await fetch(`${base}/account/reset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${auth.token}` },
+    body: JSON.stringify({}),
+  });
+  const data = await j(res);
+  assert.equal(res.status, 400, JSON.stringify(data));
+  assert.match(data.error, /确认/);
+});
+
 test('P3 重置账户清空持仓并恢复初始资金', async () => {
   const res = await fetch(`${base}/account/reset`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${auth.token}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${auth.token}` },
+    body: JSON.stringify({ confirm: '确认重置' }),
   });
   const data = await j(res);
   assert.equal(res.status, 200, JSON.stringify(data));
   assert.equal(data.cash, 1000000);
+  assert.equal(data.resetCount, 1);
 
   const pf = await fetch(`${base}/portfolio`, { headers: { Authorization: `Bearer ${auth.token}` } });
   const pdata = await j(pf);

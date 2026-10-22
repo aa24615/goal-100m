@@ -1,5 +1,12 @@
 import pool from './db.js';
 import { logger } from './logger.js';
+import {
+  getLatestQuotes,
+  getLastFetchAt,
+  quoteFeedStatus,
+  startQuoteFeed,
+  refreshQuotes,
+} from './services/quoteFeed.js';
 
 /**
  * 行情引擎（重构版）
@@ -25,6 +32,7 @@ const INDEX_BASE = 1000; // 大盘指数基点
 const state = new Map(); // code -> stock object
 let broadcaster = null;
 let tickCount = 0;
+let lastAppliedAt = 0; // 已应用的行情快照时间戳，避免同一份快照被反复广播
 const tickHooks = []; // tick 后回调（如限价单撮合）
 
 /** 注册每次 tick 之后的钩子 */
@@ -62,6 +70,20 @@ function shToday(d = new Date()) {
   return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
+/**
+ * pg 的 date 是本地时区 0 点的 Date，不能用 toISOString()（UTC+8 下会整体退一天），
+ * 必须用本地日期分量格式化，否则交易日匹配会错位。
+ */
+function toDateStr(v) {
+  if (v instanceof Date) {
+    const y = v.getFullYear();
+    const m = String(v.getMonth() + 1).padStart(2, '0');
+    const d = String(v.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return String(v).slice(0, 10);
+}
+
 // 代码稳定散列，用于生成股本（保证每次运行一致）
 export function hashOf(code) {
   let h = 0;
@@ -70,16 +92,21 @@ export function hashOf(code) {
 }
 
 export function sharesOf(code, prevClose) {
+  // pg 的 numeric/bigint 会以字符串返回，"0.00" 是 truthy，不能靠 || 兜底，必须显式数值判断
+  const base = Number(prevClose) > 0 ? Number(prevClose) : 10;
   const marketCap = 8e9 + (hashOf(code) / 1000) * 2.9e10; // 80 亿 ~ 370 亿市值
-  return Math.round(marketCap / prevClose / 1e4) * 1e4; // 取整到万股
+  return Math.round(marketCap / base / 1e4) * 1e4; // 取整到万股
 }
 
 // 股本回填：seed 阶段若未写入 shares，则按市值估算补全（仅数据，不涉及表结构）
 export async function backfillStockShares() {
   const r = await pool.query('SELECT code, price, prev_close, shares FROM stocks');
   for (const row of r.rows) {
-    if (row.shares) continue;
-    const shares = sharesOf(row.code, Number(row.prev_close || row.price || 10));
+    const has = Number(row.shares);
+    if (Number.isFinite(has) && has > 0) continue;
+    const prev = Number(row.prev_close) || Number(row.price) || 0;
+    // 无有效价格（停牌/无日线）时给中性股本，避免除零产生 Infinity 写坏 bigint 字段
+    const shares = prev > 0 ? sharesOf(row.code, prev) : 100000000;
     await pool.query('UPDATE stocks SET shares=$1 WHERE code=$2', [shares, row.code]);
   }
 }
@@ -114,6 +141,21 @@ async function saveMeta() {
 export async function loadMarket() {
   await backfillStockShares();
   await loadMeta();
+
+  // 真实数据下，交易日序号必须对齐真实日期：
+  // 用「不晚于今天的最近一个交易日」作为当前交易日，避免沿用模拟盘遗留的 seq（1,2,3...）
+  const today = shToday();
+  const { rows: lastCal } = await pool.query(
+    'SELECT seq, trade_date FROM trade_calendar WHERE trade_date <= $1 ORDER BY trade_date DESC LIMIT 1',
+    [today]
+  );
+  if (lastCal.length > 0) {
+    meta.seq = lastCal[0].seq;
+    meta.tradeDate = toDateStr(lastCal[0].trade_date);
+  } else {
+    meta.seq = await seqForDate(today);
+    meta.tradeDate = today;
+  }
 
   const { rows } = await pool.query('SELECT * FROM stocks ORDER BY code');
   const daily = await pool.query(
@@ -238,62 +280,75 @@ export function inTradingWindow(now = new Date()) {
   return (mins >= 570 && mins < 690) || (mins >= 780 && mins < 900);
 }
 
-// ---------- 盘中 tick ----------
+// ---------- 盘中 tick（价格来自真实行情快照，不再随机游走） ----------
+
+/** 把最新真实快照应用到内存行情；返回发生变化的标的 */
+function applyQuotes(now) {
+  const q = getLatestQuotes();
+  const updates = [];
+  for (const s of state.values()) {
+    const quote = q.get(s.code);
+    if (!quote || !(quote.price > 0)) continue; // 停牌/无报价沿用上一次价格
+    const prevPrice = s.price;
+    const prevVolume = s.volume;
+    s.prevClose = quote.prevClose || s.prevClose;
+    s.open = quote.open || s.open;
+    s.high = quote.high || s.high;
+    s.low = quote.low || s.low;
+    s.price = quote.price;
+    s.volume = quote.volume || s.volume;
+    s.amount = quote.amount || s.amount;
+    // 收盘/夜间价格不再变化时不做无效广播（否则每 5 秒推送 5000+ 条相同数据）
+    if (s.price === prevPrice && s.volume === prevVolume) continue;
+    s.history.push({ t: now, p: s.price });
+    if (s.history.length > MAX_HISTORY) s.history.shift();
+    updates.push({ code: s.code, price: s.price, high: s.high, low: s.low, volume: s.volume });
+  }
+  return updates;
+}
+
+/** 查交易日历；当天不在日历中（如临时新增）则顺延一个新序号 */
+async function seqForDate(d) {
+  const { rows } = await pool.query('SELECT seq FROM trade_calendar WHERE trade_date = $1', [d]);
+  if (rows.length > 0) return rows[0].seq;
+  const { rows: mx } = await pool.query('SELECT COALESCE(MAX(seq), 0) + 1 AS s FROM trade_calendar');
+  await pool.query(
+    'INSERT INTO trade_calendar (seq, trade_date) VALUES ($1, $2) ON CONFLICT (trade_date) DO NOTHING',
+    [mx[0].s, d]
+  );
+  return mx[0].s;
+}
+
+/** 跨自然日时推进交易日：昨收滚动为上一日收盘，重置当日量额 */
+async function ensureTradingDay() {
+  const today = shToday();
+  if (meta.tradeDate === today) return;
+  for (const s of state.values()) {
+    s.prevClose = s.price;
+    s.volume = 0;
+    s.amount = 0;
+    s.history = [{ t: Date.now(), p: s.price }];
+  }
+  meta.tradeDate = today;
+  meta.seq = await seqForDate(today);
+  meta.phase = 'TRADING';
+  await saveMeta();
+  logger.info('进入新交易日', { date: today, seq: meta.seq });
+}
+
 export function tick() {
   const now = Date.now();
 
-  // 真实时钟模式：非交易时段不产生行情
-  if (REAL_CLOCK && !inTradingWindow(new Date(now))) {
-    meta.phase = 'CLOSED';
-    return;
-  }
+  // 只有拿到「新的」真实快照才更新，避免同一份数据被反复广播
+  const qAt = getLastFetchAt();
+  if (!qAt || qAt === lastAppliedAt) return;
+  lastAppliedAt = qAt;
 
-  // 休市：等待若干 tick 后开盘
-  if (meta.phase === 'BREAK') {
-    meta.breakLeft -= 1;
-    if (meta.breakLeft > 0) {
-      meta.sessionTick += 1;
-      return;
-    }
-    openSession(now);
-    Promise.all([upsertDaily(), syncStocksOnOpen()]).catch((e) =>
-      logger.error('日线落库失败', { err: e })
-    );
-    saveMeta().catch((e) => logger.error('交易日历保存失败', { err: e }));
-  } else if (meta.phase === 'CLOSED' && REAL_CLOCK) {
-    meta.phase = 'TRADING';
-  }
+  const updates = applyQuotes(now);
+  if (updates.length === 0) return;
 
-  const updates = [];
-  for (const s of state.values()) {
-    // 波动率随剩余时间缩放，避免长时间吸附涨跌停板
-    const vol = INTRADAY_VOL;
-    const drift = (Math.random() - 0.5) * 0.0004;
-    // 轻微均值回复：价格偏离开盘越远，回归拉力越大，抑制单边涨跌停吸附
-    const pull = ((s.open - s.price) / s.open) * 0.02;
-    let np = s.price * (1 + drift + pull + vol * randn());
-    const lo = s.prevClose * (1 - DAILY_LIMIT);
-    const hi = s.prevClose * (1 + DAILY_LIMIT);
-    np = round2(Math.min(hi, Math.max(lo, np)));
-    s.price = np;
-    if (np > s.high) s.high = np;
-    if (np < s.low) s.low = np;
-
-    // 成交量：基础随机量（与股本相关）+ 波动放大，收盘时重置
-    const base = Math.max(20000, Math.round((s.shares || 1e8) * 0.00002));
-    const amp = 0.5 + Math.random() + Math.abs((np - s.open) / s.open) * 8;
-    s.volume += Math.floor(base * amp * 0.02);
-
-    s.history.push({ t: now, p: np });
-    if (s.history.length > MAX_HISTORY) s.history.shift();
-    updates.push({
-      code: s.code,
-      price: s.price,
-      high: s.high,
-      low: s.low,
-      volume: s.volume,
-    });
-  }
+  // 交易日推进（按真实日期）
+  ensureTradingDay().catch((e) => logger.error('交易日推进失败', { err: e }));
 
   meta.sessionTick += 1;
   tickCount += 1;
@@ -316,11 +371,6 @@ export function tick() {
     } catch (e) {
       logger.error('tick 钩子执行失败', { err: e });
     }
-  }
-
-  // 达到交易日长度则收盘结算
-  if (meta.sessionTick >= SESSION_TICKS) {
-    closeSession(now).catch((e) => logger.error('收盘结算失败', { err: e }));
   }
 }
 
@@ -474,7 +524,8 @@ function quoteOf(s) {
     low: s.low,
     volume: s.volume,
     change: round2(s.price - s.prevClose),
-    changePct: round2(((s.price - s.prevClose) / s.prevClose) * 100),
+    // 昨收为 0（停牌/无数据）时不能做除法，否则得到 Infinity/NaN 直接污染前端展示
+    changePct: s.prevClose > 0 ? round2(((s.price - s.prevClose) / s.prevClose) * 100) : 0,
   };
 }
 
@@ -529,21 +580,25 @@ export function getMarketStatus() {
     inWindow: REAL_CLOCK ? inTradingWindow() : true,
     tickMs: TICK_MS,
     dailyLimit: DAILY_LIMIT,
+    // 真实数据相关
+    dataSource: 'REAL', // 已切换为真实 A 股行情，不再是随机模拟
+    stocks: state.size,
+    realQuotes: getLatestQuotes().size,
+    quote: quoteFeedStatus(),
+    inTradingWindow: inTradingWindow(),
   };
 }
 
-// 演示用：强制进入下一交易日
+// 真实行情模式下不再支持「跳到下一交易日」（那会凭空造出假的开盘价），
+// 保留接口以兼容前端，行为改为立即刷新一次真实快照并返回当前状态。
 export async function forceNextSession() {
-  const now = Date.now();
-  if (meta.phase !== 'BREAK') await closeSession(now);
-  openSession(now);
-  await upsertDaily();
-  await syncStocksOnOpen();
-  await saveMeta();
+  await refreshQuotes();
   return getMarketStatus();
 }
 
 export function startMarket() {
+  // 真实行情：启动快照拉取（价格由数据源驱动，tick 不再随机游走）
+  startQuoteFeed(inTradingWindow);
   // 用 try/catch 包住，单次 tick 异常不会中断整个定时器
   const timer = setInterval(() => {
     try {
@@ -552,10 +607,11 @@ export function startMarket() {
       logger.error('行情 tick 执行异常', { err: e });
     }
   }, TICK_MS);
-  logger.info('行情引擎启动', {
+  logger.info('行情引擎启动（真实行情）', {
     tickMs: TICK_MS,
     stocks: state.size,
-    sessionTicks: SESSION_TICKS,
+    tradeDate: meta.tradeDate,
+    seq: meta.seq,
     realClock: REAL_CLOCK,
   });
   return timer;

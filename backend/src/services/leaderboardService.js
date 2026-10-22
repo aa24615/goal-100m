@@ -57,6 +57,11 @@ export async function buildLeaderboard(period) {
     'SELECT user_id, COUNT(*)::int AS c FROM transactions GROUP BY user_id'
   );
   const tradeMap = new Map(tx.rows.map((r) => [r.user_id, r.c]));
+  // RQ-34：重置次数与起点变化标注 —— 反复重开的账号不再与「从未重置」的账号混排比较
+  const rst = await pool.query(
+    'SELECT user_id, COUNT(*)::int AS c, MAX(created_at) AS at FROM account_resets GROUP BY user_id'
+  );
+  const resetMap = new Map(rst.rows.map((r) => [r.user_id, { count: r.c, at: r.at }]));
 
   const holdMap = new Map();
   for (const r of h.rows) {
@@ -116,15 +121,36 @@ export async function buildLeaderboard(period) {
       returnPct,
       excessPct: Math.round((returnPct - benchmarkPct) * 100) / 100,
       tradeCount: tradeMap.get(x.id) || 0,
+      resetCount: resetMap.get(x.id)?.count || 0,
+      lastResetAt: resetMap.get(x.id)?.at || null,
     });
   }
+  // 注意：排名必须基于全量用户计算后再切片，否则切片外用户的 rank 会失真
   result.sort((a, b) => b.returnPct - a.returnPct);
   result.forEach((r, i) => {
     r.rank = i + 1;
   });
 
   logger.debug('排行榜计算完成', { period, users: result.length, benchmarkPct });
-  return { benchmarkPct, rows: result.slice(0, TOP_N) };
+  return { benchmarkPct, rows: result };
+}
+
+/**
+ * 取展示用榜单：前 TOP_N 名 + 钉住的「我的排名」。
+ *
+ * 只返回前 N 名会让榜外用户永远看不到自己 —— 既无法感知名次，
+ * 也看不到 RQ-34 标注的重置次数。因此对登录用户追加一行自己的真实排名，
+ * 用 isSelf 标记供前端高亮/吸底展示。
+ *
+ * @param {Array} rows 全量已排名数据
+ * @param {number|null} selfId 当前登录用户 id（游客为 null）
+ */
+export function pickBoard(rows = [], selfId = null, limit = TOP_N) {
+  const top = rows.slice(0, limit);
+  if (selfId == null) return top;
+  if (top.some((r) => r.id === selfId)) return top;
+  const me = rows.find((r) => r.id === selfId);
+  return me ? [...top, { ...me, isSelf: true }] : top;
 }
 
 /** 带缓存的排行榜取数：路由层与 benchmark 接口共用同一份缓存 */

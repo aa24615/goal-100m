@@ -7,6 +7,7 @@ import { subscribe } from '../ws';
 import { useWatchlist } from '../hooks/useWatchlist';
 import StockChart from '../components/StockChart';
 import TradePanel from '../components/TradePanel';
+import Disclaimer from '../components/Disclaimer';
 import type { StockDetail as Detail, StockQuote } from '../types';
 import { formatNum, formatPct, changeClass, formatMoney } from '../utils';
 
@@ -85,6 +86,8 @@ export default function StockDetail() {
 
   return (
     <div>
+      {/* RQ-29：免责声明下沉到交易页面 */}
+      <Disclaimer />
       <Space style={{ marginBottom: 16 }}>
         <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/market')}>
           返回行情

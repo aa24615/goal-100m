@@ -7,6 +7,46 @@ const prices = new Map<string, StockQuote>();
 const listeners = new Set<Listener>();
 let reconnectTimer: number | null = null;
 let pingTimer: number | null = null;
+// 重连状态：固定 2 秒无条件重连会在服务端异常时形成请求风暴 ——
+// 2026-10-21 曾因缺少退避在 7 小时内产生 8604 条「WebSocket 鉴权失败」日志。
+// 现改为「指数退避 + 抖动 + 次数上限 + 后台标签页暂停」。
+let reconnectAttempts = 0;
+let reconnectPaused = false; // 页面隐藏时挂起重连，恢复可见后再继续
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
+const RECONNECT_MAX_ATTEMPTS = 10;
+
+function nextReconnectDelay(): number {
+  const exp = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempts);
+  // ±30% 抖动：避免多个标签页在同一时刻集体重连形成尖峰
+  const jitter = 0.7 + Math.random() * 0.6;
+  return Math.round(exp * jitter);
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer !== null) return;
+  reconnectAttempts += 1;
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, nextReconnectDelay());
+}
+
+// 页面不可见时不重连（挂着过夜的标签页是历史日志风暴的直接来源），
+// 恢复可见时重置退避并立即补一次连接。
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    if (!reconnectPaused) return;
+    reconnectPaused = false;
+    reconnectAttempts = 0;
+    if (reconnectTimer !== null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    connect();
+  });
+}
 let lastTickTime = Date.now(); // 统一使用服务端 tick 时间，避免两端时钟偏差导致曲线回折
 let emitScheduled = false;
 let pendingArgs: [StockQuote[], number] | null = null;
@@ -50,6 +90,9 @@ function connect() {
   ws = new WebSocket(url);
 
   ws.onopen = () => {
+    // 连接成功即重置退避计数，避免一次偶发抖动后长期停留在最大间隔
+    reconnectAttempts = 0;
+    reconnectPaused = false;
     // 客户端心跳：定期发送 ping 文本，配合服务端 ping/pong 保活
     if (pingTimer !== null) window.clearInterval(pingTimer);
     pingTimer = window.setInterval(() => {
@@ -95,12 +138,17 @@ function connect() {
       localStorage.removeItem('pt_token');
       return;
     }
-    if (reconnectTimer === null) {
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, 2000);
+    // 后台标签页：挂起重连，等页面重新可见时再恢复
+    if (typeof document !== 'undefined' && document.hidden) {
+      reconnectPaused = true;
+      return;
     }
+    // 超过上限则停止重连，避免服务端长期不可用时被客户端持续冲击
+    if (reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+      reconnectPaused = true;
+      return;
+    }
+    scheduleReconnect();
   };
 
   ws.onerror = () => {
@@ -112,6 +160,13 @@ connect();
 
 // 登录/登出后需要重建带新 token 的连接
 export function reconnect() {
+  // 主动重连视为「已知原因的重建」，重置退避以免沿用上一次的失败计数
+  reconnectAttempts = 0;
+  reconnectPaused = false;
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   if (ws) {
     ws.onclose = null;
     ws.close();

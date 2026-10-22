@@ -4,6 +4,7 @@ import api from '../api';
 import { getPrice, subscribe } from '../ws';
 import { useAuth } from '../auth';
 import { formatMoney, formatNum } from '../utils';
+import RuleHint from './RuleHint';
 import type { StockQuote } from '../types';
 
 interface FeeConfig {
@@ -175,6 +176,10 @@ export default function TradePanel({
           style={{ marginBottom: 16 }}
         />
       )}
+      {/* RQ-13：规则在下单面板就地解释，不要求用户先去读文档 */}
+      <div style={{ marginBottom: 12 }}>
+        <RuleHint />
+      </div>
       <Segmented
         block
         value={orderType}

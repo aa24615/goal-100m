@@ -12,13 +12,20 @@ import equityRoutes from './routes/equity.js';
 import configRoutes from './routes/config.js';
 import watchlistRoutes from './routes/watchlist.js';
 import orderRoutes from './routes/orders.js';
+import replayRoutes from './routes/replay.js';
+import reviewRoutes from './routes/review.js';
+import onboardingRoutes from './routes/onboarding.js';
+import scenarioRoutes from './routes/scenario.js';
+import roomRoutes from './routes/rooms.js';
+import analyticsRoutes from './routes/analytics.js';
 import { matchOrders } from './orders.js';
 import { loadMarket, startMarket, setBroadcaster, getSnapshot, onTick } from './market.js';
 import { seedStocks } from './seed.js';
+import { seedScenarios } from './services/scenarioService.js';
 import { startSnapshots } from './snapshots.js';
 import { runMigrations } from './migrate.js';
 import { logger, installProcessGuards, onShutdown } from './logger.js';
-import { requestLogger, notFoundHandler, errorHandler } from './middleware.js';
+import { requestLogger, notFoundHandler, errorHandler, proxyClientIp } from './middleware.js';
 
 installProcessGuards();
 
@@ -70,6 +77,9 @@ export function createApp() {
   app.use('/api/login', authLimiter);
   app.use('/api/auth/register', authLimiter);
   app.use('/api/auth/login', authLimiter);
+  // 密码找回同样受登录级限流保护，防止被滥用于邮件轰炸（RQ-30 防滥用）
+  app.use('/api/auth/forgot', authLimiter);
+  app.use('/api/auth/reset', authLimiter);
   app.use('/api/trade', tradeLimiter);
 
   app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
@@ -82,6 +92,12 @@ export function createApp() {
   app.use('/api', configRoutes);
   app.use('/api', watchlistRoutes);
   app.use('/api', orderRoutes);
+  app.use('/api', replayRoutes);
+  app.use('/api', reviewRoutes);
+  app.use('/api', onboardingRoutes);
+  app.use('/api', scenarioRoutes);
+  app.use('/api', roomRoutes);
+  app.use('/api', analyticsRoutes);
 
   // 兜底中间件必须放在所有路由之后：记录 404 与未捕获异常
   app.use(notFoundHandler);
@@ -111,20 +127,60 @@ function startServer() {
   }
   setBroadcaster(broadcast);
 
+  // 鉴权失败日志节流：同一 IP 在窗口内最多记录 WS_AUTH_LOG_MAX 条，
+  // 超出后静默，窗口结束时补一条汇总（含被抑制计数）。
+  const WS_AUTH_LOG_WINDOW_MS = 60_000;
+  const WS_AUTH_LOG_MAX = 3;
+  const wsAuthSeen = new Map(); // ip -> { count, suppressed, windowStart }
+
+  function wsAuthLogGate(ip) {
+    const now = Date.now();
+    const rec = wsAuthSeen.get(ip);
+    if (!rec || now - rec.windowStart >= WS_AUTH_LOG_WINDOW_MS) {
+      if (rec && rec.suppressed > 0) {
+        logger.warn('WebSocket 鉴权失败(汇总)', {
+          ip,
+          suppressed: rec.suppressed,
+          windowMs: WS_AUTH_LOG_WINDOW_MS,
+        });
+      }
+      wsAuthSeen.set(ip, { count: 1, suppressed: 0, windowStart: now });
+      return true;
+    }
+    rec.count += 1;
+    if (rec.count <= WS_AUTH_LOG_MAX) return true;
+    rec.suppressed += 1;
+    return false;
+  }
+
+  // 防止 Map 随 IP 增长而泄漏：每次连接建立时惰性清理过期条目
+  function gcWsAuthSeen() {
+    const now = Date.now();
+    for (const [k, v] of wsAuthSeen) {
+      if (now - v.windowStart >= WS_AUTH_LOG_WINDOW_MS * 2) wsAuthSeen.delete(k);
+    }
+  }
+
   wss.on('connection', (ws, req) => {
+    gcWsAuthSeen();
+    const ip = proxyClientIp(req);
     // WebSocket 鉴权：token 通过 query 传入（?token=xxx）
     if (WS_AUTH) {
       const url = new URL(req.url, 'http://localhost');
       const uid = verifyToken(url.searchParams.get('token'));
       if (!uid) {
-        logger.warn('WebSocket 鉴权失败，拒绝连接', { ip: req.socket?.remoteAddress });
+        // 客户端重连风暴会把同一条失败日志放大上万倍（2026-10-21 曾产生 8604 条），
+        // 按 IP 节流：窗口内只记前 N 条，末尾汇总一次被抑制的数量
+        if (wsAuthLogGate(ip)) {
+          logger.warn('WebSocket 鉴权失败，拒绝连接', { ip });
+        }
         ws.close(4001, 'unauthorized');
         return;
       }
       ws.userId = uid;
     }
     logger.info('WebSocket 客户端连接', {
-      ip: req.socket?.remoteAddress,
+      ip,
       userId: ws.userId ?? null,
       total: wss.clients.size,
     });
@@ -200,6 +256,7 @@ async function main() {
   logger.info('数据库连接成功');
   await runMigrations(pool);
   await seedStocks();
+  await seedScenarios(); // 剧本题库：固定 8 关，启动即就绪（RQ-16）
   await loadMarket();
   startSnapshots();
   // 每个行情 tick 之后尝试撮合限价委托

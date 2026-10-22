@@ -98,3 +98,94 @@ body {
 .brand-pitch:hover {
   transform: translateY(-2px);
 }
+
+/* ---------------- RQ-23 排行榜「我的排名」 ----------------
+   榜单默认只下发前 TOP_N 名，登录用户若在榜外会被追加到末尾（isSelf）。
+   这里用左侧色条 + 底色把它和真正的 TOP_N 区分开，避免名次被误读。 */
+.ant-table-tbody > tr.row-self > td {
+  background: #f0f9ff;
+}
+
+.ant-table-tbody > tr.row-self > td:first-child {
+  box-shadow: inset 3px 0 0 #0d9488;
+}
+
+/* ---------------- RQ-33 深色模式 ----------------
+   由 App.tsx 切换 document.body.dataset.theme，
+   这里只覆盖 antd 之外的自有容器（背景、卡片、页脚）。 */
+body[data-theme='dark'] {
+  background: #141414;
+}
+
+/* 深色模式下「我」所在行改用低亮度蓝底，保证文字对比度 */
+body[data-theme='dark'] .ant-table-tbody > tr.row-self > td {
+  background: #10283a;
+}
+
+body[data-theme='dark'] .page-card,
+body[data-theme='dark'] .tabbar {
+  background: #1f1f1f;
+  border-color: #303030;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+body[data-theme='dark'] .auth-footer {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* 深色下正文对比度兜底，保证基本可读性 */
+body[data-theme='dark'] .ant-typography,
+body[data-theme='dark'] .money {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* ---------------- RQ-33 信息密度 ---------------- */
+body[data-density='compact'] .page-card {
+  padding: 10px;
+}
+
+body[data-density='compact'] .ant-table-tbody > tr > td,
+body[data-density='compact'] .ant-table-thead > tr > th {
+  padding: 6px 8px !important;
+}
+
+body[data-density='loose'] .page-card {
+  padding: 24px;
+}
+
+/* ---------------- RQ-25 移动端响应式 ----------------
+   目标：主流手机宽度下无横向滚动、无遮挡、按钮可点击。 */
+@media (max-width: 768px) {
+  body {
+    overflow-x: hidden;
+  }
+
+  .page-card {
+    padding: 10px;
+    border-radius: 8px;
+  }
+
+  /* 表格改为可横向滚动而非撑破视口 */
+  .ant-table-wrapper {
+    overflow-x: auto;
+  }
+
+  /* 顶栏信息在窄屏下纵向堆叠，避免互相遮挡 */
+  .ant-layout-header {
+    padding: 0 10px !important;
+    row-gap: 6px !important;
+  }
+
+  /* 统计卡在窄屏下两列显示，避免数字被截断 */
+  .ant-statistic-title {
+    font-size: 12px;
+  }
+  .ant-statistic-content {
+    font-size: 18px !important;
+  }
+
+  /* 弹窗在手机上占满宽度，避免按钮被挤出屏幕 */
+  .ant-modal {
+    max-width: calc(100vw - 16px);
+  }
+}

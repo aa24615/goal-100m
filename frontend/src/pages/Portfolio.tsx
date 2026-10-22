@@ -5,6 +5,7 @@ import api from '../api';
 import { useAuth } from '../auth';
 import TradePanel from '../components/TradePanel';
 import EquityChart, { type EquityMetric } from '../components/EquityChart';
+import Disclaimer from '../components/Disclaimer';
 import type { Portfolio as PF, Holding, EquityResponse, Order } from '../types';
 import { formatMoney, formatPct, changeClass } from '../utils';
 import { usePortfolio } from '../hooks/usePortfolio';
@@ -90,6 +91,8 @@ export default function Portfolio() {
 
   return (
     <div>
+      {/* RQ-29：免责声明下沉到持仓页面 */}
+      <Disclaimer />
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={6}>
           <Card>

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Card, Table, Tag, Empty, Segmented, Typography } from 'antd';
+import { Card, Table, Tag, Empty, Segmented, Typography, Space } from 'antd';
 import api from '../api';
 import type { LeaderRow } from '../types';
 import { formatMoney, formatPct, changeClass } from '../utils';
@@ -56,7 +56,22 @@ export default function Leaderboard() {
           <span style={{ color: '#8c8c8c' }}>{rank}</span>
         ),
     },
-    { title: '选手', dataIndex: 'username' },
+    {
+      title: '选手',
+      dataIndex: 'username',
+      render: (v: string, r: LeaderRow) => (
+        <Space size={4}>
+          <span style={r.isSelf ? { fontWeight: 700 } : undefined}>{v}</span>
+          {r.isSelf && <Tag color="blue">我</Tag>}
+          {/* RQ-34：反复重置的账号在榜单上标注，避免与从未重置的账号混排比较 */}
+          {(r.resetCount ?? 0) > 0 && (
+            <Tag color="orange" title={r.lastResetAt ? `最近重置：${new Date(r.lastResetAt).toLocaleString('zh-CN')}` : ''}>
+              已重置 {r.resetCount} 次
+            </Tag>
+          )}
+        </Space>
+      ),
+    },
     {
       title: '总资产',
       dataIndex: 'totalAssets',
@@ -121,6 +136,8 @@ export default function Leaderboard() {
         columns={columns}
         dataSource={rows}
         pagination={false}
+        // 榜外用户被追加在末尾，用底色区分，避免被误读为 TOP_N 之一
+        rowClassName={(r: LeaderRow) => (r.isSelf ? 'row-self' : '')}
         locale={{ emptyText: <Empty description="暂无选手" /> }}
       />
       <Text type="secondary" style={{ display: 'block', marginTop: 12, fontSize: 12 }}>
