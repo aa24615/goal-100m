@@ -185,10 +185,18 @@ router.post(
 router.post(
   '/login',
   asyncHandler(async (req, res) => {
-    const { account, password } = req.body || {};
-    const acc = norm(account);
+    // 账号字段兼容 username / email 别名：本接口历史上只认 account，
+    // 外部脚本（如 gettok.mjs、prep.mjs）传 username 时会拿到
+    // 「请输入账号和密码」，而日志里 account 记为空串 —— 既误导排障又无法自证。
+    // 这里按 account > username > email 取值，并在日志里带上实际收到的键名。
+    const { account, username, email, password } = req.body || {};
+    const acc = norm(account || username || email);
     if (!acc || !password) {
-      logger.warn('登录失败: 参数缺失', { account: acc, ip: req.ip });
+      logger.warn('登录失败: 参数缺失', {
+        account: acc,
+        bodyKeys: Object.keys(req.body || {}),
+        ip: req.ip,
+      });
       return res.status(400).json({ error: '请输入账号和密码' });
     }
     const { rows } = await pool.query(

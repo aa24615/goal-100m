@@ -123,7 +123,12 @@ export function errorHandler(err, req, res, next) {
   if (err?.type) meta.errType = err.type;
 
   if (clientStatus) {
-    logger.warn('请求报文非法(4xx)', meta);
+    // 区分「业务规则拒绝」与「请求报文非法」：
+    // 后者是 body-parser/413/415 等报文层面的失败，说明客户端打错了；
+    // 前者是入参合法但未通过业务校验（T+1 冻结、资金不足、邀请码无效…），属于正常业务路径。
+    // 混用同一文案会让 4xx 告警失去可行动性——2026-10-22 的 248 条
+    // 「请求报文非法」里约 240 条其实是业务规则拒绝。
+    logger.warn(err?.business ? '业务规则拒绝(4xx)' : '请求报文非法(4xx)', meta);
     if (res.headersSent) return next(err);
     const msg = err?.expose
       ? err.message
@@ -149,6 +154,7 @@ export function businessError(message, status = 400, extra) {
   e.status = status;
   e.extra = extra || {};
   e.expose = true;
+  e.business = true; // 标记为业务规则拒绝，区别于报文解析失败
   return e;
 }
 

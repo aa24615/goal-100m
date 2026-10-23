@@ -153,6 +153,29 @@ function startServer() {
     return false;
   }
 
+  // 单账号并发连接上限：2026-10-23 实测同一用户（userId=21）在 30 秒内累积出 8 条常连接，
+  // 且全天 56 次连接只对应 40 次断开（净泄漏 16 条）。客户端泄漏或异常重连会让
+  // wss.clients 无上限增长，而每次 tick 都要向全部连接广播全市场快照，连接数直接放大广播成本。
+  // 超出上限时关闭该用户「最旧」的几条，保证最近打开的页面可用。
+  const WS_MAX_PER_USER = Number(process.env.WS_MAX_PER_USER || 3);
+  const connOpenedAt = new WeakMap(); // ws -> 建立时间戳
+
+  function enforceConnLimit(uid) {
+    if (typeof uid !== 'number') return; // 未鉴权连接（WS_AUTH=0）不参与限制
+    const mine = [];
+    for (const c of wss.clients) if (c.userId === uid) mine.push(c);
+    if (mine.length <= WS_MAX_PER_USER) return;
+    mine.sort((a, b) => (connOpenedAt.get(a) || 0) - (connOpenedAt.get(b) || 0));
+    // 当前连接是最新建立的，排序后必在末尾，不会被自己淘汰
+    for (const victim of mine.slice(0, mine.length - WS_MAX_PER_USER)) {
+      try {
+        victim.close(4002, 'connection limit');
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   // 防止 Map 随 IP 增长而泄漏：每次连接建立时惰性清理过期条目
   function gcWsAuthSeen() {
     const now = Date.now();
@@ -179,6 +202,8 @@ function startServer() {
       }
       ws.userId = uid;
     }
+    connOpenedAt.set(ws, Date.now());
+    enforceConnLimit(ws.userId);
     logger.info('WebSocket 客户端连接', {
       ip,
       userId: ws.userId ?? null,
@@ -190,7 +215,18 @@ function startServer() {
     });
     ws.send(JSON.stringify({ type: 'snapshot', stocks: getSnapshot() }));
     ws.on('error', (e) => logger.error('WebSocket 连接异常', { err: e }));
-    ws.on('close', () => logger.info('WebSocket 客户端断开', { total: wss.clients.size }));
+    ws.on('close', (code, reason) => {
+      // 补 close code / reason / 存活时长：此前只有 total，无法判断连接是客户端正常关闭、
+      // 被限流淘汰（4002）、鉴权拒绝（4001）还是心跳超时被 terminate，排障全靠猜。
+      logger.info('WebSocket 客户端断开', {
+        ip,
+        userId: ws.userId ?? null,
+        code: code ?? null,
+        reason: Buffer.isBuffer(reason) ? reason.toString() : String(reason || ''),
+        ms: Date.now() - (connOpenedAt.get(ws) ?? Date.now()),
+        total: wss.clients.size,
+      });
+    });
   });
   wss.on('error', (e) => logger.error('WebSocket 服务异常', { err: e }));
 

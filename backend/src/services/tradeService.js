@@ -20,6 +20,7 @@ export function tradeError(message, status, extra) {
   e.status = status;
   e.extra = extra || {};
   e.expose = true; // 业务错误：允许透传消息给前端（区别于 body-parser 等底层 4xx）
+  e.business = true; // 与 businessError 同义，便于日志区分业务拒绝与报文非法
   return e;
 }
 

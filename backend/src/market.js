@@ -375,8 +375,9 @@ export function tick() {
 
   const duePersist = tickCount % PERSIST_EVERY === 0;
   if (duePersist) {
-    persist(updates).catch((e) => logger.error('行情落库失败', { err: e }));
-    upsertDaily().catch((e) => logger.error('日线落库失败', { err: e }));
+    const ctx = { seq: meta.seq, tradeDate: meta.tradeDate, stocks: state.size };
+    persist(updates).catch((e) => logErrThrottled('persist', '行情落库失败', e, ctx));
+    upsertDaily().catch((e) => logErrThrottled('daily', '日线落库失败', e, ctx));
   }
 
   if (broadcaster) broadcaster(updates, now);
@@ -434,6 +435,29 @@ async function persist(updates) {
   );
 }
 
+// 落库类异常日志节流：tick 每 PERSIST_EVERY 个周期落库一次，数据库持续异常时会以
+// 约 12 条/分钟 的速度刷 ERROR（2026-10-22 实测 4 分钟内 62 条），淹没真正的首发异常。
+// 同一原因在窗口内只记首条，窗口结束时补一条汇总。
+const errLogAt = new Map(); // key -> { at, suppressed }
+const ERR_LOG_WINDOW_MS = 5 * 60 * 1000;
+
+function logErrThrottled(key, msg, err, extra = {}) {
+  const now = Date.now();
+  const rec = errLogAt.get(key);
+  if (!rec || now - rec.at >= ERR_LOG_WINDOW_MS) {
+    if (rec && rec.suppressed > 0) {
+      logger.error(`${msg}(汇总)`, { suppressed: rec.suppressed, windowMs: ERR_LOG_WINDOW_MS });
+    }
+    errLogAt.set(key, { at: now, suppressed: 0 });
+    logger.error(msg, { err, ...extra });
+    return;
+  }
+  rec.suppressed += 1;
+}
+
+// 日线落库跳过未知标的时的节流时间戳
+let unknownCodeWarnAt = 0;
+
 async function upsertDaily() {
   const codes = [];
   const seqs = [];
@@ -458,12 +482,17 @@ async function upsertDaily() {
     prevs.push(s.prevClose);
   }
   if (codes.length === 0) return;
-  await pool.query(
+  // JOIN stocks 过滤掉「内存中仍有、但 stocks 表已不存在」的陈旧标的。
+  // 2026-10-22 标的池在进程运行期间被替换，单个未知 code 触发 FK 违反(23503)，
+  // 导致整批语句回滚——全部标的当日日线一起丢失（ERROR 62 条）。
+  // 这里让未知标的被静默跳过，其余标的照常落库，把「局部脏数据」与「整体丢失」解耦。
+  const { rowCount } = await pool.query(
     `INSERT INTO stock_daily (code, seq, trade_date, open, high, low, close, volume, amount, prev_close)
-     SELECT * FROM unnest(
+     SELECT t.* FROM unnest(
        $1::text[], $2::int[], $3::date[], $4::numeric[], $5::numeric[], $6::numeric[],
        $7::numeric[], $8::bigint[], $9::numeric[], $10::numeric[]
-     )
+     ) AS t(code, seq, trade_date, open, high, low, close, volume, amount, prev_close)
+     JOIN stocks s ON s.code = t.code
      ON CONFLICT (code, seq) DO UPDATE SET
        high = EXCLUDED.high,
        low = EXCLUDED.low,
@@ -473,6 +502,25 @@ async function upsertDaily() {
        prev_close = EXCLUDED.prev_close`,
     [codes, seqs, dates, opens, highs, lows, closes, vols, amounts, prevs]
   );
+  // rowCount 为实际写入行数，小于传入行数说明有标的被 JOIN 过滤
+  if (rowCount < codes.length) {
+    const now = Date.now();
+    if (now - unknownCodeWarnAt >= ERR_LOG_WINDOW_MS) {
+      unknownCodeWarnAt = now;
+      const { rows } = await pool.query(
+        `SELECT t.code FROM unnest($1::text[]) AS t(code)
+          WHERE NOT EXISTS (SELECT 1 FROM stocks s WHERE s.code = t.code)`,
+        [codes]
+      );
+      logger.warn('日线落库跳过未知标的', {
+        skipped: rows.map((r) => r.code).slice(0, 20),
+        skippedCount: rows.length,
+        total: codes.length,
+        seq: meta.seq,
+        tradeDate: meta.tradeDate,
+      });
+    }
+  }
 }
 
 // 开盘：滚动昨收与今开，重置当日量额
