@@ -300,7 +300,7 @@ function Shell() {
         {!isMobile && (
           <Sider theme={prefs.theme === 'dark' ? 'dark' : 'light'} width={200} breakpoint="lg" collapsedWidth={0}>
             <div className="logo">
-              <span className="logo-main">赚他一个小目标</span>
+              <span className="logo-main">赚一个小目标</span>
               <span className="logo-sub">模拟股票</span>
             </div>
             {nav}

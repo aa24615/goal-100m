@@ -38,13 +38,7 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     if (!reconnectPaused) return;
-    reconnectPaused = false;
-    reconnectAttempts = 0;
-    if (reconnectTimer !== null) {
-      window.clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    connect();
+    reconnectNow();
   });
 }
 let lastTickTime = Date.now(); // 统一使用服务端 tick 时间，避免两端时钟偏差导致曲线回折
@@ -87,20 +81,37 @@ function connect() {
   // 携带 token：服务端会校验，未登录的连接会被拒绝（4001）
   const token = localStorage.getItem('pt_token') || '';
   const url = `${proto}://${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
-  ws = new WebSocket(url);
 
-  ws.onopen = () => {
+  // 幂等：任何进入 connect() 的路径都先拆掉已存在的连接。
+  // 此前页面从后台恢复（visibilitychange）会直接 connect()，旧连接失去 JS 引用却仍
+  // 挂在服务端，wss.clients 只增不减 —— 2026-10-23 实测 56 次连接 / 40 次断开，净泄漏 16 条。
+  // 摘除旧回调可避免旧连接的 close 事件误触发重连调度。
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) {
+    ws.onclose = null;
+    ws.onerror = null;
+    try {
+      ws.close(4000, 'replaced');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const socket = new WebSocket(url);
+  ws = socket;
+
+  socket.onopen = () => {
     // 连接成功即重置退避计数，避免一次偶发抖动后长期停留在最大间隔
     reconnectAttempts = 0;
     reconnectPaused = false;
     // 客户端心跳：定期发送 ping 文本，配合服务端 ping/pong 保活
     if (pingTimer !== null) window.clearInterval(pingTimer);
     pingTimer = window.setInterval(() => {
-      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
+      // 判定局部 socket 而非模块级 ws：并发重建时不会误向已被替换的连接发数据
+      if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'ping' }));
     }, 25000);
   };
 
-  ws.onmessage = (e) => {
+  socket.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
       if (data.type === 'snapshot') {
@@ -128,7 +139,7 @@ function connect() {
     }
   };
 
-  ws.onclose = (e) => {
+  socket.onclose = (e) => {
     if (pingTimer !== null) {
       window.clearInterval(pingTimer);
       pingTimer = null;
@@ -136,6 +147,13 @@ function connect() {
     // 4001 = 未授权：清除无效 token，不再重连（交由页面跳登录）
     if (e.code === 4001) {
       localStorage.removeItem('pt_token');
+      return;
+    }
+    // 4002 = 服务端按单账号连接数上限关闭了本条最旧连接：
+    // 说明已有其它页面在用，本页让位并挂起，否则两页会互相挤掉形成重连风暴。
+    // 页面重新可见时（visibilitychange）再参与竞争。
+    if (e.code === 4002) {
+      reconnectPaused = true;
       return;
     }
     // 后台标签页：挂起重连，等页面重新可见时再恢复
@@ -151,9 +169,25 @@ function connect() {
     scheduleReconnect();
   };
 
-  ws.onerror = () => {
-    ws?.close();
+  // onerror 只关闭「自己」：此前用模块级 ws，并发重建时会误关掉刚建好的新连接
+  socket.onerror = () => {
+    try {
+      socket.close();
+    } catch {
+      /* ignore */
+    }
   };
+}
+
+// 统一重建入口：先复位退避状态，再幂等重建（connect 内部负责拆旧连接）
+function reconnectNow() {
+  reconnectAttempts = 0;
+  reconnectPaused = false;
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  connect();
 }
 
 connect();
@@ -161,15 +195,5 @@ connect();
 // 登录/登出后需要重建带新 token 的连接
 export function reconnect() {
   // 主动重连视为「已知原因的重建」，重置退避以免沿用上一次的失败计数
-  reconnectAttempts = 0;
-  reconnectPaused = false;
-  if (reconnectTimer !== null) {
-    window.clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  if (ws) {
-    ws.onclose = null;
-    ws.close();
-  }
-  connect();
+  reconnectNow();
 }

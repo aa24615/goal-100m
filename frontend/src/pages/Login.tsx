@@ -95,7 +95,7 @@ export default function Login() {
       >
         <div style={{ width: '100%', maxWidth: 880, display: 'flex', gap: 32, flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' }}>
           <div className="brand-pitch" style={{ maxWidth: 380, padding: '20px 0' }}>
-            <Title style={{ color: '#0f766e', marginBottom: 4 }}>赚他一个小目标</Title>
+            <Title style={{ color: '#0f766e', marginBottom: 4 }}>赚一个小目标</Title>
             <div style={{ color: '#5f807d', fontSize: 14, letterSpacing: 3, marginBottom: 12 }}>
               模 拟 股 票
             </div>
@@ -215,7 +215,7 @@ export default function Login() {
 
       <footer className="auth-footer">
         <div>
-          <span style={{ color: '#0d9488', fontWeight: 600 }}>赚他一个小目标 · 模拟股票</span>
+          <span style={{ color: '#0d9488', fontWeight: 600 }}>赚一个小目标 · 模拟股票</span>
           <span>　|　仅供模拟练习，不构成任何投资建议</span>
         </div>
         <div>
