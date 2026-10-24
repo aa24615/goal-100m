@@ -101,11 +101,27 @@ export async function cancelOrder({ userId, orderId }) {
   return { ok: true, id: orderId };
 }
 
+// 撮合重入保护：撮合是「选出 PENDING → 逐条 executeTrade」的非原子过程，
+// 而调用方（market.js 的 tick 钩子）不 await 本函数，tick 间隔默认 2s。
+// 一旦单轮耗时超过间隔，下一 tick 会并发拉起第二个 matchOrders，
+// 两者读到同一批 PENDING 委托 —— 若无防重入，同一条委托会被成交两次。
+let matching = false;
+
 /**
  * 撮合：对每个 tick 检查所有未成交委托
  * 买单：委托价 >= 当前市价 → 成交；卖单：委托价 <= 当前市价 → 成交
  */
 export async function matchOrders() {
+  if (matching) return 0;
+  matching = true;
+  try {
+    return await doMatchOrders();
+  } finally {
+    matching = false;
+  }
+}
+
+async function doMatchOrders() {
   const { rows } = await pool.query(
     "SELECT * FROM orders WHERE status='PENDING' ORDER BY created_at ASC LIMIT 200"
   );
@@ -127,6 +143,18 @@ export async function matchOrders() {
     if (o.side === 'BUY' && market >= hi * 0.999) continue;
     if (o.side === 'SELL' && market <= lo * 1.001) continue;
 
+    // 原子占位：先把委托抢成 FILLED，只有抢占成功（此前确实还是 PENDING）才真正成交。
+    // 修复前这里是 executeTrade 成功扣款后才无条件 UPDATE 置位，有两个后果：
+    //   ① 撤单被「复活」：用户在撮合窗口内撤单后，status 被覆盖回 FILLED，
+    //      而资金/持仓已经变动且无法回滚；
+    //   ② 重复成交：两轮撮合（重入或重启后）读到同一条委托，两轮都会 executeTrade 成功。
+    // 用带 status 条件的 UPDATE 让数据库行锁做裁决：只有 rowCount=1 的一方继续成交。
+    const claim = await pool.query(
+      "UPDATE orders SET status='FILLED', filled_price=$1, updated_at=now() WHERE id=$2 AND status='PENDING'",
+      [market, o.id]
+    );
+    if (claim.rowCount === 0) continue; // 已被撤单或已被其它轮次成交
+
     try {
       await executeTrade({
         uid: o.user_id,
@@ -136,10 +164,6 @@ export async function matchOrders() {
         price: market,
         stockName: o.stock_name,
       });
-      await pool.query(
-        "UPDATE orders SET status='FILLED', filled_price=$1, updated_at=now() WHERE id=$2",
-        [market, o.id]
-      );
       filled += 1;
       logger.info('限价委托成交', {
         orderId: o.id,
@@ -149,12 +173,15 @@ export async function matchOrders() {
         price: market,
       });
     } catch (e) {
-      // 资金/持仓不足等业务原因：保留委托继续等待，仅记录
-      if (e && e.status) {
-        await pool.query('UPDATE orders SET note=$1, updated_at=now() WHERE id=$2', [
-          e.message,
-          o.id,
-        ]);
+      // 占位已抢到但成交失败：回退为 PENDING，让委托继续等待下一次撮合。
+      // 不回退会让委托卡在 FILLED 但资金/持仓并未变动，用户也永远等不到成交。
+      const isBusiness = Boolean(e && e.status);
+      const reason = isBusiness ? e.message : '撮合异常，已回退为待成交';
+      await pool.query(
+        "UPDATE orders SET status='PENDING', filled_price=NULL, note=$1, updated_at=now() WHERE id=$2",
+        [reason, o.id]
+      );
+      if (isBusiness) {
         logger.warn('限价委托暂不可成交', { orderId: o.id, reason: e.message });
       } else {
         logger.error('限价委托撮合异常', { orderId: o.id, err: e });

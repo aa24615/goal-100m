@@ -1,6 +1,6 @@
 import express from 'express';
 import { authMiddleware } from '../auth.js';
-import { asyncHandler } from '../middleware.js';
+import { asyncHandler, parseIdParam } from '../middleware.js';
 import { listOrders, createOrder, cancelOrder } from '../orders.js';
 
 const router = express.Router();
@@ -41,7 +41,9 @@ router.delete(
   '/orders/:id',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    const r = await cancelOrder({ userId: req.userId, orderId: Number(req.params.id) });
+    const orderId = parseIdParam(req.params.id);
+    if (orderId === null) return res.status(400).json({ error: '委托 ID 无效' });
+    const r = await cancelOrder({ userId: req.userId, orderId });
     if (r.error) return res.status(r.status).json({ error: r.error });
     res.json(r);
   })

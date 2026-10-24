@@ -163,3 +163,17 @@ export function asyncHandler(fn) {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
 }
+
+/**
+ * 解析路径参数里的正整数 ID，非法输入返回 null。
+ *
+ * 背景：直接 `Number(req.params.id)` 时，`/api/orders/abc` 会得到 NaN，
+ * pg 把它序列化成字面量 'NaN' 发给 PostgreSQL，数据库解析 integer 列时抛
+ * 22P02（invalid input syntax for type integer），最终被 errorHandler 兜底成
+ * **500 + 一条 ERROR 日志**。也就是说「用户随便填个路径」就能制造服务端错误告警，
+ * 污染 5xx 指标并掩盖真实故障。这里统一拦成 400。
+ */
+export function parseIdParam(raw) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}

@@ -535,6 +535,11 @@ router.post(
       await client.query('DELETE FROM holdings WHERE user_id=$1', [uid]);
       await client.query('DELETE FROM transactions WHERE user_id=$1', [uid]);
       await client.query('DELETE FROM asset_snapshots WHERE user_id=$1', [uid]);
+      // 未成交委托必须一并清空：orders 只在删除 users 行时级联（ON DELETE CASCADE），
+      // 而重置是 UPDATE 式恢复、不动用户行。此前漏删会导致「重置后现金恢复为初始资金 →
+      // 下一个 tick 撮合时资金一定充足 → 旧挂单被自动成交」，用户看到刚重置完钱又少了、
+      // 持仓又冒出来，且这笔交易会进入排行榜与复盘统计。
+      await client.query('DELETE FROM orders WHERE user_id=$1', [uid]);
       await client.query('UPDATE users SET cash=$1, initial_capital=$1 WHERE id=$2', [
         INITIAL_CAPITAL,
         uid,

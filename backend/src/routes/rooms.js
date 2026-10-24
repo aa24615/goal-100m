@@ -2,7 +2,7 @@
 
 import express from 'express';
 import { authMiddleware } from '../auth.js';
-import { asyncHandler, businessError } from '../middleware.js';
+import { asyncHandler, businessError, parseIdParam } from '../middleware.js';
 import { createRoom, joinRoom, roomDetail, myRooms, closeRoom } from '../services/roomService.js';
 
 const router = express.Router();
@@ -43,7 +43,9 @@ router.get(
   '/rooms/:id',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    res.json(await roomDetail(Number(req.params.id), req.userId));
+    const roomId = parseIdParam(req.params.id);
+    if (roomId === null) return res.status(400).json({ error: '房间 ID 无效' });
+    res.json(await roomDetail(roomId, req.userId));
   })
 );
 
@@ -52,7 +54,9 @@ router.post(
   '/rooms/:id/close',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    res.json(await closeRoom({ roomId: Number(req.params.id), userId: req.userId }));
+    const roomId = parseIdParam(req.params.id);
+    if (roomId === null) return res.status(400).json({ error: '房间 ID 无效' });
+    res.json(await closeRoom({ roomId, userId: req.userId }));
   })
 );
 

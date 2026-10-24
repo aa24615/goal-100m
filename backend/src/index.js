@@ -1,5 +1,7 @@
 import express from 'express';
 import http from 'http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import { WebSocketServer } from 'ws';
@@ -306,7 +308,23 @@ async function main() {
 }
 
 // 仅当作为入口直接运行时启动（集成测试 import 本模块时不启动服务）
-if (import.meta.url === `file://${process.argv[1]}`) {
+//
+// 原先写成 `import.meta.url === `file://${process.argv[1]}``：
+// Linux 下二者一致，但 Windows 下 import.meta.url 是 file:///D:/xxx（三斜杠 + 正斜杠），
+// 而模板串拼出的是 file://D:\xxx（两斜杠 + 反斜杠），永不相等 ——
+// 直接 `node src/index.js` 会静默退出且没有任何日志，看起来像「启动即崩」。
+// 统一转成真实文件系统路径再比较，跨平台一致。
+const isDirectEntry = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return fileURLToPath(import.meta.url) === path.resolve(entry);
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectEntry) {
   main().catch((e) => {
     logger.error('服务启动失败(fatal)', { err: e });
     process.exit(1);

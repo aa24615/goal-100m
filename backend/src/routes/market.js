@@ -58,10 +58,15 @@ router.get('/stocks/:code/daily', async (req, res, next) => {
           [code, days]
         );
     if (rows.length === 0) return res.status(404).json({ error: '该标的暂无历史行情' });
+    // 两个分支统一按时间升序（旧 → 新）返回：前端按数组顺序推进回放游标与绘制 K 线。
+    // 默认分支 SQL 是 ORDER BY seq DESC + LIMIT（取最近 N 根），需要反转；
+    // 区间分支 SQL 已是 ASC，此前共用同一个 reverse() 反而被转成降序（新 → 旧），
+    // 与默认分支口径相反 —— 按区间请求时 K 线左右镜像、均线/涨跌幅方向全反。
+    const ordered = useRange ? rows : rows.slice().reverse();
     res.json({
       code,
       count: rows.length,
-      bars: rows.reverse().map((r) => ({
+      bars: ordered.map((r) => ({
         seq: r.seq,
         date: r.trade_date instanceof Date ? r.trade_date.toISOString().slice(0, 10) : String(r.trade_date),
         open: Number(r.open),

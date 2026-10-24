@@ -25,7 +25,13 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://papertrade:papertrade@db:5432/papertrade
+      # JWT_SECRET 必须由根目录 .env 提供（勿提交到仓库）。
+      # 这里的兜底值只是为了让 compose 能启动；配合下面的 NODE_ENV=production，
+      # auth.js 的 resolveSecret() 会在密钥缺失/仍是占位值时直接抛错退出，
+      # 而不是退回「可伪造 token 的公开密钥」静默运行。
       JWT_SECRET: ${JWT_SECRET:-please-change-this-secret}
+      # 开启生产模式：默认密钥将被拒绝（fail-closed），并关闭重置令牌的明文回显
+      NODE_ENV: production
       PORT: 3001
       TICK_MS: 2000
       SNAPSHOT_MS: 60000

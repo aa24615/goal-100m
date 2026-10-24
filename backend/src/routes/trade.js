@@ -31,6 +31,13 @@ router.post(
       logger.warn('交易失败: 参数错误', { userId: uid, code, type, quantity });
       return res.status(400).json({ error: '参数错误' });
     }
+    // A 股整手约束：市价单此前缺这道校验，而限价单（orders.js:48）与回放
+    // （replayService.js:428）都有 —— 同一业务三条链路口径不一致，
+    // 会产生 37 股这类其它链路都不认可的持仓，后续无法用等量限价单卖出。
+    if (quantity % 100 !== 0) {
+      logger.warn('交易失败: 数量非整手', { userId: uid, code, type, quantity });
+      return res.status(400).json({ error: '交易数量需为 100 的整数倍' });
+    }
     const c = code.toUpperCase();
     const d = getDetail(c);
     if (!d) {
