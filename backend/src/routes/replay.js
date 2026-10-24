@@ -2,7 +2,7 @@
 
 import express from 'express';
 import { authMiddleware } from '../auth.js';
-import { asyncHandler } from '../middleware.js';
+import { asyncHandler, parseIdParam } from '../middleware.js';
 import { logger } from '../logger.js';
 import {
   getReplayRange,
@@ -69,10 +69,9 @@ router.get(
   '/replay/:id',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    if (!Number.isInteger(Number(req.params.id))) {
-      return res.status(400).json({ error: '会话 ID 无效' });
-    }
-    res.json(await getSessionState({ userId: req.userId, sessionId: Number(req.params.id) }));
+    const sessionId = parseIdParam(req.params.id);
+    if (sessionId === null) return res.status(400).json({ error: '会话 ID 无效' });
+    res.json(await getSessionState({ userId: req.userId, sessionId }));
   })
 );
 
@@ -86,7 +85,11 @@ router.post(
       logger.warn('回放推进参数错误', { userId: req.userId, action });
       return res.status(400).json({ error: '不支持的操作' });
     }
-    res.json(await stepSession({ userId: req.userId, sessionId: Number(req.params.id), action, seq }));
+    // 与 GET /replay/:id 保持一致：非法 :id 会被 Number() 变成 NaN/小数，
+    // 直接进 SQL 命中 bigint 列时 PostgreSQL 抛 22P02，最终兜底成 500。
+    const sessionId = parseIdParam(req.params.id);
+    if (sessionId === null) return res.status(400).json({ error: '会话 ID 无效' });
+    res.json(await stepSession({ userId: req.userId, sessionId, action, seq }));
   })
 );
 
@@ -96,7 +99,9 @@ router.post(
   authMiddleware,
   asyncHandler(async (req, res) => {
     const { code, side, quantity } = req.body || {};
-    res.json(await tradeInReplay({ userId: req.userId, sessionId: Number(req.params.id), code, side, quantity }));
+    const sessionId = parseIdParam(req.params.id);
+    if (sessionId === null) return res.status(400).json({ error: '会话 ID 无效' });
+    res.json(await tradeInReplay({ userId: req.userId, sessionId, code, side, quantity }));
   })
 );
 
@@ -105,7 +110,9 @@ router.post(
   '/replay/:id/finish',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    const r = await finishSession({ userId: req.userId, sessionId: Number(req.params.id) });
+    const sessionId = parseIdParam(req.params.id);
+    if (sessionId === null) return res.status(400).json({ error: '会话 ID 无效' });
+    const r = await finishSession({ userId: req.userId, sessionId });
     await track(req.userId, 'replay_finish', {
       sessionId: r.session.id,
       returnPct: r.score?.returnPct,
