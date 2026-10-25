@@ -8,13 +8,38 @@
  *    口径来自后端 METRIC_HINTS，前端不做二次改写（RQ-78）。
  */
 
-import React from 'react';
-import { Card, Progress, Statistic, Tag, Typography, Alert, Space, Tooltip, Table, Divider, Empty } from 'antd';
-import { InfoCircleOutlined } from '@ant-design/icons';
+import React, { useMemo, useState } from 'react';
+import { Card, Progress, Statistic, Tag, Typography, Alert, Space, Tooltip, Table, Divider, Empty, Button } from 'antd';
+import { InfoCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { CheckupPayload, BreakdownGroup, MetricHint } from '../types';
 import { formatMoney, formatNum } from '../utils';
 
 const { Text, Paragraph, Title } = Typography;
+
+/** RQ-80 达标提示「出现一次且可关闭」：关闭状态存本地，不污染服务端数据 */
+const MILESTONE_DISMISS_KEY = 'mm8888.checkup.milestone.dismissed';
+
+function milestoneDismissed(key: string) {
+  try {
+    const raw = window.localStorage.getItem(MILESTONE_DISMISS_KEY);
+    if (!raw) return false;
+    return JSON.parse(raw).includes(key);
+  } catch {
+    return false;
+  }
+}
+
+function dismissMilestone(key: string) {
+  try {
+    const raw = window.localStorage.getItem(MILESTONE_DISMISS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(list)) return;
+    if (!list.includes(key)) list.push(key);
+    window.localStorage.setItem(MILESTONE_DISMISS_KEY, JSON.stringify(list));
+  } catch {
+    /* localStorage 不可用（隐私模式）时静默降级：提示会重复出现，但不影响功能 */
+  }
+}
 
 function HintSuffix({ hint }: { hint: MetricHint }) {
   return (
@@ -49,7 +74,53 @@ function BreakdownTable({ title, groups }: { title: string; groups: BreakdownGro
   );
 }
 
-export default function CheckupPanel({ data, loading }: { data: CheckupPayload | null; loading?: boolean }) {
+/**
+ * 本组件刻意**不直接持有路由与网络**：导航与开训交给父页面注入回调。
+ * 原因：体检单是纯展示组件，一旦内部调用 useNavigate，任何脱离 <Router> 的渲染
+ * （单测、分享卡片、导出快照）都会直接抛 invariant。留在这里的是展示，出去的是副作用。
+ */
+export interface CheckupPanelProps {
+  data: CheckupPayload | null;
+  loading?: boolean;
+  /** RQ-85 冷启动引导的「去做第一段盲测」点击 */
+  onStartTraining?: (path: string) => void;
+  /** RQ-83 「就练这个」：由父页面调用处方接口并跳转到新会话 */
+  onStartPrescription?: (checkup: CheckupPayload) => void | Promise<void>;
+}
+
+export default function CheckupPanel({ data, loading, onStartTraining, onStartPrescription }: CheckupPanelProps) {
+  const [prescribing, setPrescribing] = useState(false);
+  const [showMilestone, setShowMilestone] = useState(true);
+
+  // RQ-79 分档：后端未返回 tier（旧版/单测 mock）时退化为「够 / 不够」两态，不崩
+  const tier = data?.tier ?? null;
+  const progress = data?.progress ?? null;
+  const sampleSize = Number(data?.sampleSize ?? 0);
+
+  const milestone = useMemo(() => {
+    if (!data?.milestone?.justReached) return null;
+    const key = String(data.milestone.tierKey || '');
+    if (!key) return null;
+    return showMilestone && !milestoneDismissed(key) ? data.milestone : null;
+  }, [data, showMilestone]);
+
+  // 进度条口径优先用后端 progress（已按「当前档→下一档」区间计算），
+  // 缺失时退回旧算法，保证向后兼容
+  const percent = progress
+    ? progress.percent
+    : Math.min(100, Math.round((sampleSize / Math.max(1, Number(data?.threshold || 50))) * 100));
+
+  /** RQ-83 从体检单「最坏习惯」一键开训（副作用在父页面） */
+  const startPrescription = async () => {
+    if (!data || !onStartPrescription) return;
+    setPrescribing(true);
+    try {
+      await onStartPrescription(data);
+    } finally {
+      setPrescribing(false);
+    }
+  };
+
   return (
     <Card title="交易体检单" loading={loading} data-testid="checkup-panel">
       {!data && <Empty description="暂无体检数据" />}
@@ -64,12 +135,98 @@ export default function CheckupPanel({ data, loading }: { data: CheckupPayload |
             message={data.gate.message}
             description={
               <Progress
-                percent={Math.min(100, Math.round((data.sampleSize / data.threshold) * 100))}
+                percent={percent}
                 size="small"
                 status={data.sufficient ? 'success' : 'active'}
               />
             }
           />
+
+          {/* RQ-79 可信度分档：明示「能信什么 / 还不能拿它做什么」 */}
+          {tier && (
+            <div data-testid="checkup-tier" style={{ marginBottom: 12 }}>
+              <Space wrap size={8} style={{ marginBottom: 6 }}>
+                <Tag color={tier.key === 'none' ? 'default' : tier.key === 'strategy' ? 'green' : 'blue'}>
+                  当前可信度：{tier.label}
+                </Tag>
+                {tier.next && <Text type="secondary" style={{ fontSize: 12 }}>{progress?.text || ''}</Text>}
+                {tier.reachedTop && <Text type="secondary" style={{ fontSize: 12 }}>已达最高档</Text>}
+              </Space>
+              <div style={{ fontSize: 12 }}>
+                <div>
+                  <Text type="secondary">能信：</Text>
+                  {tier.canTrust?.length > 0 ? tier.canTrust.join('；') : '暂时什么都还不能下结论'}
+                </div>
+                <div>
+                  <Text type="secondary">还不能拿它做：</Text>
+                  {tier.cannotTrust?.length > 0 ? tier.cannotTrust.join('；') : '—'}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* RQ-80 距下一档的进度条 */}
+          {progress && !progress.reachedTop && (
+            <div data-testid="checkup-progress" style={{ marginBottom: 12 }}>
+              <Progress
+                percent={progress.percent}
+                size="small"
+                format={() => progress.text}
+                status="active"
+              />
+            </div>
+          )}
+
+          {/* RQ-80 达标当日提示：出现一次，可关闭 */}
+          {milestone && (
+            <Alert
+              type="success"
+              showIcon
+              closable
+              style={{ marginBottom: 12 }}
+              data-testid="checkup-milestone"
+              message={milestone.message}
+              description={milestone.cannot}
+              onClose={() => {
+                dismissMilestone(String(milestone.tierKey || ''));
+                setShowMilestone(false);
+              }}
+            />
+          )}
+
+          {/* RQ-85 冷启动：0 笔不给空面板，给「先做 3 段盲测」的具体动作 */}
+          {data.coldStart?.isCold && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              data-testid="checkup-cold-start"
+              message={data.coldStart.title}
+              description={
+                <div>
+                  <ol style={{ paddingLeft: 18, margin: '6px 0' }}>
+                    {(data.coldStart.steps || []).map((s) => (
+                      <li key={s} style={{ fontSize: 12 }}>
+                        {s}
+                      </li>
+                    ))}
+                  </ol>
+                  <Button
+                    type="primary"
+                    size="small"
+                    icon={<ThunderboltOutlined />}
+                    data-testid="cold-start-go"
+                    onClick={() => onStartTraining?.(data.coldStart?.action?.path || '/blind')}
+                  >
+                    {data.coldStart.action?.label || '去做第一段盲测'}
+                  </Button>
+                  <div style={{ fontSize: 12, marginTop: 6 }}>
+                    <Text type="secondary">{data.coldStart.note}</Text>
+                  </div>
+                </div>
+              }
+            />
+          )}
 
           {/* 样本不足：不渲染任何评级/标签，只给原始流水 */}
           {!data.sufficient && (
@@ -181,7 +338,27 @@ export default function CheckupPanel({ data, loading }: { data: CheckupPayload |
               style={{ marginTop: 8 }}
               data-testid="worst-habit"
               message={`最坏习惯：${data.worstHabit.label} · 代价 ${formatMoney(data.worstHabit.cost)}`}
-              description={data.worstHabit.detail}
+              description={
+                <div>
+                  <div>{data.worstHabit.detail}</div>
+                  {/* RQ-83 训练处方：体检 → 训练闭环的入口，竞品全无这一段 */}
+                  <div style={{ marginTop: 8 }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      先改这一项，比同时改五项更容易见效。
+                    </Text>
+                    <Button
+                      type="primary"
+                      size="small"
+                      style={{ marginLeft: 8 }}
+                      loading={prescribing}
+                      data-testid="prescription-start"
+                      onClick={startPrescription}
+                    >
+                      就练这个
+                    </Button>
+                  </div>
+                </div>
+              }
             />
           )}
 

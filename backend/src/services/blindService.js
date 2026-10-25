@@ -13,7 +13,7 @@
 import pool from '../db.js';
 import { logger } from '../logger.js';
 import { simulateReplay } from './replayService.js';
-import { buildCheckup, disciplineRate, SAMPLE_THRESHOLD } from './checkupService.js';
+import { buildCheckup, buildPrescription, disciplineRate, SAMPLE_THRESHOLD } from './checkupService.js';
 import { round2, pct2 } from '../utils/time.js';
 
 const DEFAULT_CAPITAL = 1000000;
@@ -25,6 +25,112 @@ const MAX_BARS = 200;
 export const DECISION_INTERVAL = 10;
 /** 「有流动性」的门槛：区间内日均成交额（元），低于此值的标的不进入随机池 */
 const MIN_AVG_AMOUNT = 5_000_000;
+
+/* ------------------------------------------------------------------ *
+ * RQ-81 多周期粒度                                                     *
+ * ------------------------------------------------------------------ *
+ * Q6（分钟级数据是否可得）未确认前，只支持日线。
+ * 这里把「支持什么、不支持什么」写成常量而不是散落在判断里，
+ * 是为了让页面能直接渲染「当前仅日线」而不是假装支持后返回空数据。
+ */
+export const GRANULARITIES = [
+  { key: 'day', label: '日线', available: true, note: '每个 seq 对应一个交易日，数据完整' },
+  { key: 'm60', label: '60 分钟', available: false, note: '分钟级数据源未接入，暂不可用' },
+  { key: 'm30', label: '30 分钟', available: false, note: '分钟级数据源未接入，暂不可用' },
+  { key: 'm15', label: '15 分钟', available: false, note: '分钟级数据源未接入，暂不可用' },
+  { key: 'm5', label: '5 分钟', available: false, note: '分钟级数据源未接入，暂不可用' },
+];
+export const DEFAULT_GRANULARITY = 'day';
+
+export function isGranularityAvailable(key) {
+  const g = GRANULARITIES.find((x) => x.key === String(key || '').toLowerCase());
+  return Boolean(g && g.available);
+}
+
+/* ------------------------------------------------------------------ *
+ * RQ-82 片段特征标签                                                   *
+ * ------------------------------------------------------------------ *
+ * 四类：趋势 / 震荡 / 回撤 / 高波动。
+ * 全部由**真实日线**算出（纯算术、不接 AI），因此「标签与真实行情特征一致」
+ * 这条验收标准可以被单测直接验证，而不依赖人工目测。
+ */
+export const SEGMENT_TAGS = {
+  trend: { key: 'trend', label: '趋势', desc: '方向明确、回撤小的单边行情，练「拿得住」' },
+  range: { key: 'range', label: '震荡', desc: '反复上下、没有方向，练「看不懂就不动」' },
+  pullback: { key: 'pullback', label: '回撤', desc: '自高点明显回落，练「计划止损先写后做」' },
+  volatile: { key: 'volatile', label: '高波动', desc: '日内跳动放大，练「情绪上头时不动手」' },
+};
+
+/** 分类阈值：集中在一处，便于按 A 股实际波动水平校准 */
+export const TAG_THRESHOLDS = {
+  volatileVol: 0.025, // 日收益标准差 ≥ 2.5% → 高波动
+  pullbackDD: 0.15, // 最大回撤 ≥ 15% → 具备回撤特征
+  pullbackNetMax: 0.05, // 且净收益 < 5%（涨回去的不算回撤）
+  trendNet: 0.2, // 净收益绝对值 ≥ 20% → 具备方向
+  trendEfficiency: 0.3, // 且 |净收益| ÷ 累计波动 ≥ 30%（走得干脆，不是来回蹭上去）
+};
+
+/**
+ * 由收盘价序列算出片段特征（纯函数，可单测）。
+ *
+ * @param {number[]} closes 按时间升序的收盘价
+ * @returns {object|null} { tag, label, metrics } ；数据不足返回 null
+ */
+export function classifySegment(closes) {
+  const arr = Array.isArray(closes) ? closes.map((c) => Number(c)).filter((c) => Number.isFinite(c) && c > 0) : [];
+  if (arr.length < 3) return null;
+
+  const rets = [];
+  for (let i = 1; i < arr.length; i += 1) rets.push(arr[i] / arr[i - 1] - 1);
+
+  const netReturn = arr[arr.length - 1] / arr[0] - 1;
+  const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
+  const variance = rets.reduce((s, r) => s + (r - mean) ** 2, 0) / rets.length;
+  const vol = Math.sqrt(variance);
+  const sumAbs = rets.reduce((s, r) => s + Math.abs(r), 0);
+  // 效率比：净移动 ÷ 累计路程。≈1 是直线上涨，≈0 是原地打转
+  const efficiency = sumAbs > 0 ? Math.abs(netReturn) / sumAbs : 0;
+
+  let peak = arr[0];
+  let maxDD = 0;
+  for (const c of arr) {
+    if (c > peak) peak = c;
+    const dd = peak > 0 ? (peak - c) / peak : 0;
+    if (dd > maxDD) maxDD = dd;
+  }
+
+  const t = TAG_THRESHOLDS;
+  let tag = 'range';
+  if (vol >= t.volatileVol) tag = 'volatile';
+  else if (maxDD >= t.pullbackDD && netReturn < t.pullbackNetMax) tag = 'pullback';
+  else if (Math.abs(netReturn) >= t.trendNet && efficiency >= t.trendEfficiency) tag = 'trend';
+
+  return {
+    tag,
+    label: SEGMENT_TAGS[tag].label,
+    desc: SEGMENT_TAGS[tag].desc,
+    metrics: {
+      bars: arr.length,
+      netReturn: round2(netReturn * 100),
+      volatility: round2(vol * 100),
+      maxDrawdown: round2(maxDD * 100),
+      efficiency: round2(efficiency * 100),
+    },
+  };
+}
+
+export function isValidTag(tag) {
+  return Object.prototype.hasOwnProperty.call(SEGMENT_TAGS, String(tag || '').toLowerCase());
+}
+
+/** 取某标的某区间的收盘价（升序），仅用于特征分类 */
+async function loadCloses(code, startSeq, endSeq) {
+  const { rows } = await pool.query(
+    'SELECT close FROM stock_daily WHERE code=$1 AND seq BETWEEN $2 AND $3 ORDER BY seq ASC',
+    [code, startSeq, endSeq]
+  );
+  return rows.map((r) => Number(r.close));
+}
 
 export function blindError(message, status = 400) {
   const e = new Error(message);
@@ -150,8 +256,13 @@ export function decisionPointsOf(session) {
  *
  * @param {object} o { bars, liquidOnly }
  */
-export async function pickRandomSegment({ bars = DEFAULT_BARS, liquidOnly = true } = {}) {
+export async function pickRandomSegment({ bars = DEFAULT_BARS, liquidOnly = true, tag = null } = {}) {
   const n = clampBars(bars);
+  // RQ-82 按标签抽取：非法标签直接拒绝，避免静默退化为「随机」后用户以为自己在定向练
+  const wantTag = isValidTag(tag) ? String(tag).toLowerCase() : null;
+  if (tag && !wantTag) {
+    throw blindError(`未知的片段类型：${String(tag)}（可选 ${Object.keys(SEGMENT_TAGS).join(' / ')}）`, 400);
+  }
 
   // 先确定全局 seq 上下界，避免对每只票重复求 MIN/MAX
   const { rows: rangeRows } = await pool.query(
@@ -195,20 +306,47 @@ export async function pickRandomSegment({ bars = DEFAULT_BARS, liquidOnly = true
       [n]
     );
     if (all.length === 0) throw blindError('没有满足长度要求的标的，无法生成盲测片段', 400);
-    return chooseSegment(all, n);
+    return chooseSegment(all, n, wantTag);
   }
-  return chooseSegment(candidates, n);
+  return chooseSegment(candidates, n, wantTag);
 }
 
-function chooseSegment(candidates, n) {
-  // 均匀随机：先随机标的，再在其可用起点范围内随机起点
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+/**
+ * 均匀随机：先随机标的，再在其可用起点范围内随机起点。
+ *
+ * RQ-82：无论是否指定标签，都会对抽中的片段做一次特征分类并带回 tag ——
+ * 不指定标签时也要落库，否则历史列表无法回看「这段练的是什么」。
+ * 指定标签时按「重采样直到匹配」实现：比在 SQL 里做窗口函数算波动率简单得多，
+ * 且抽不到时给出明确 400，而不是静默返回一个不匹配的片段。
+ */
+async function chooseSegment(candidates, n, wantTag = null) {
+  const maxAttempts = wantTag ? 40 : 20;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const c = candidates[Math.floor(Math.random() * candidates.length)];
     const lo = c.minseq;
     const hi = c.maxseq - n + 1;
     if (hi < lo) continue;
     const start = lo + Math.floor(Math.random() * (hi - lo + 1));
-    return { code: c.code, name: c.name, startSeq: start, endSeq: start + n - 1, bars: n };
+    const endSeq = start + n - 1;
+
+    const cls = classifySegment(await loadCloses(c.code, start, endSeq));
+    if (wantTag && (!cls || cls.tag !== wantTag)) continue;
+
+    return {
+      code: c.code,
+      name: c.name,
+      startSeq: start,
+      endSeq,
+      bars: n,
+      tag: cls ? cls.tag : null,
+      tagMetrics: cls ? cls.metrics : null,
+    };
+  }
+  if (wantTag) {
+    throw blindError(
+      `连续 ${maxAttempts} 次未抽到「${SEGMENT_TAGS[wantTag].label}」特征的片段，请换一个类型或去掉筛选后重试`,
+      400
+    );
   }
   throw blindError('随机片段抽取失败，请重试', 400);
 }
@@ -269,26 +407,73 @@ async function loadMeta(codes) {
  * @param {object} o { userId, bars, liquidOnly, code, startSeq, endSeq }
  *   指定 code/startSeq/endSeq 时走「定向片段」；否则随机（RQ-67）。
  */
-export async function startBlind({ userId, bars, liquidOnly = true, code, startSeq, endSeq } = {}) {
+export async function startBlind({
+  userId,
+  bars,
+  liquidOnly = true,
+  code,
+  startSeq,
+  endSeq,
+  tag = null,
+  prescriptionKey = null,
+  granularity = DEFAULT_GRANULARITY,
+} = {}) {
+  // RQ-81 粒度校验前置：分钟级数据未接入时必须明确拒绝，
+  // 否则用户以为自己在练日内，实际拿到的是日线，训练结论会错位。
+  const gkey = String(granularity || DEFAULT_GRANULARITY).toLowerCase();
+  if (!isGranularityAvailable(gkey)) {
+    throw blindError(
+      `暂不支持「${gkey}」粒度：分钟级行情数据源尚未接入，当前仅提供日线（day）训练`,
+      400
+    );
+  }
+
   let seg;
   if (code && Number.isInteger(Number(startSeq)) && Number.isInteger(Number(endSeq))) {
     seg = { code: String(code).toUpperCase(), name: '', startSeq: Number(startSeq), endSeq: Number(endSeq) };
     const { rows } = await pool.query('SELECT name FROM stocks WHERE code=$1', [seg.code]);
     if (rows.length === 0) throw blindError('标的不存在', 404);
     seg.name = rows[0].name;
+    const cls = classifySegment(await loadCloses(seg.code, seg.startSeq, seg.endSeq));
+    seg.tag = cls ? cls.tag : null;
+    seg.tagMetrics = cls ? cls.metrics : null;
   } else {
-    seg = await pickRandomSegment({ bars, liquidOnly });
+    seg = await pickRandomSegment({ bars, liquidOnly, tag });
   }
   const n = clampBars(bars);
   if (seg.endSeq - seg.startSeq + 1 < MIN_BARS) throw blindError('片段长度不足', 400);
 
   const { rows } = await pool.query(
     `INSERT INTO blind_sessions
-       (user_id, stock_code, stock_name, alias, start_seq, end_seq, cursor_seq, initial_capital, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'RUNNING') RETURNING *`,
-    [userId, seg.code, seg.name, makeAlias(Date.now() ^ Math.floor(Math.random() * 0xffff)), seg.startSeq, seg.endSeq, seg.startSeq, DEFAULT_CAPITAL]
+       (user_id, stock_code, stock_name, alias, start_seq, end_seq, cursor_seq, initial_capital, status,
+        segment_tag, tag_metrics, prescription_key, granularity)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'RUNNING',$9,$10,$11,$12) RETURNING *`,
+    [
+      userId,
+      seg.code,
+      seg.name,
+      makeAlias(Date.now() ^ Math.floor(Math.random() * 0xffff)),
+      seg.startSeq,
+      seg.endSeq,
+      seg.startSeq,
+      DEFAULT_CAPITAL,
+      seg.tag || null,
+      seg.tagMetrics ? JSON.stringify(seg.tagMetrics) : null,
+      prescriptionKey ? String(prescriptionKey).slice(0, 32) : null,
+      gkey,
+    ]
   );
-  logger.info('双盲训练开始', { userId, sessionId: rows[0].id, code: seg.code, startSeq: seg.startSeq, endSeq: seg.endSeq, bars: n });
+  logger.info('双盲训练开始', {
+    userId,
+    sessionId: rows[0].id,
+    code: seg.code,
+    startSeq: seg.startSeq,
+    endSeq: seg.endSeq,
+    bars: n,
+    tag: seg.tag,
+    prescriptionKey: prescriptionKey || null,
+    granularity: gkey,
+  });
   return rows[0];
 }
 
@@ -520,7 +705,8 @@ export async function tradeInBlind({ userId, sessionId, side, quantity }) {
 
 export async function listBlindSessions(userId, limit = 20) {
   const { rows } = await pool.query(
-    `SELECT id, alias, stock_code, stock_name, start_seq, end_seq, status, score, created_at, finished_at
+    `SELECT id, alias, stock_code, stock_name, start_seq, end_seq, status, score, created_at, finished_at,
+            segment_tag, granularity, prescription_key
        FROM blind_sessions WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2`,
     [userId, Math.min(100, Number(limit) || 20)]
   );
@@ -536,7 +722,15 @@ export async function listBlindSessions(userId, limit = 20) {
     score: r.score,
     createdAt: r.created_at,
     finishedAt: r.finished_at,
+    // RQ-82 特征标签是统计口径不是身份信息，可以展示
+    segmentTag: r.segment_tag || null,
+    segmentTagLabel: r.segment_tag ? SEGMENT_TAGS[r.segment_tag]?.label || null : null,
+    // RQ-81 粒度明示
+    granularity: r.granularity || DEFAULT_GRANULARITY,
+    prescriptionKey: r.prescription_key || null,
   }));
 }
 
-export { DEFAULT_BARS, MIN_BARS, MAX_BARS, buildCheckup };
+// 注意：SEGMENT_TAGS / GRANULARITIES / classifySegment 等已在定义处用 export 声明，
+// 此处只导出原本未导出的常量，重复 export 同名标识符会直接抛 SyntaxError 导致整个模块加载失败。
+export { DEFAULT_BARS, MIN_BARS, MAX_BARS, buildCheckup, buildPrescription };

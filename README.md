@@ -98,6 +98,31 @@
         └── pages/          # 登录/行情/详情/自选/持仓/记录/排行
 ```
 
+## 发布流程（必读 · RQ-87）
+
+本项目已两次出现「生产代码 ≠ 仓库代码」：功能在仓库里、单测全绿，但线上跑的是旧镜像，
+新接口全量 404。根因是**发布链路没有固化**，因此这三步是硬约束，顺序不可颠倒：
+
+```bash
+# ① 提交并推送双远端（GitHub + CNB）
+git add -A && git commit -m "..." && git push origin main
+
+# ② 在宿主机重新构建前端 —— 镜像只 COPY 本机 dist，不重新 build 等于没改
+cd frontend && npm run build && cd ..
+
+# ③ 重建并启动容器
+docker compose up -d --build
+```
+
+发布前**必须**执行一致性检查，不通过就不要发：
+
+```bash
+cd backend && npm run release:check
+```
+
+它会校验：工作区是否干净、HEAD 是否已推送到全部远端、`dist` 资源是否完整且**不落后于源码**、
+迁移是否全部应用、README 是否写明发布三步。任一项失败即以退出码 1 阻断。
+
 ## 快速开始（Docker）
 
 > 需已安装 Docker 与 Docker Compose。

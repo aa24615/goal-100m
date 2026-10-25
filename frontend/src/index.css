@@ -189,3 +189,50 @@ body[data-density='loose'] .page-card {
     max-width: calc(100vw - 16px);
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * RQ-84 手机端训练页（.blind-mobile 由 useIsMobile 在 ≤768px 时挂载）  *
+ * ------------------------------------------------------------------ *
+ * 训练的主场景（休市 / 通勤 / 碎片时间）在手机上，而竞品全是手机端。
+ * 目标不是「手机上勉强能看」，而是「单手能完整走完一次训练」：
+ * 进入 → 决策 → 结束 → 成绩，全程不产生横向滚动。
+ */
+@media (max-width: 768px) {
+  .blind-mobile {
+    /* 关键约束：横向滚动会让 K 线与操作区互相打架，直接禁用 */
+    overflow-x: hidden;
+  }
+
+  .blind-mobile .ant-card-body {
+    padding: 12px;
+  }
+
+  /* 大按钮：手指点击目标不小于 44px，避免误触旁边的「卖出」 */
+  .blind-mobile .ant-btn {
+    min-height: 44px;
+    font-size: 15px;
+  }
+
+  /* 数量输入与表格在竖屏下必须自适应宽度 */
+  .blind-mobile .ant-input-number {
+    width: 100%;
+  }
+
+  .blind-mobile .ant-table-wrapper {
+    overflow-x: hidden;
+  }
+
+  .blind-mobile .ant-table-cell {
+    padding: 6px 4px !important;
+    font-size: 12px;
+  }
+
+  /* 统计项两列排布，避免现金/盈亏数字被截断 */
+  .blind-mobile .ant-statistic {
+    min-width: 45%;
+  }
+
+  .blind-mobile .ant-statistic-content {
+    font-size: 18px !important;
+  }
+}

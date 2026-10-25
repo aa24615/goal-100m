@@ -524,6 +524,103 @@ export interface CheckupPayload {
   gate: CheckupGate;
   rawRounds: Array<Record<string, unknown>>;
   breakdown: CheckupBreakdown;
+  /**
+   * RQ-79 可信度分档：50 行为级 / 100 绩效级 / 200 策略级。
+   *
+   * 以下 7 个字段均为可选：后端新版本必定返回，但为了兼容「旧后端 + 新前端」
+   * 与单测里不完整的 mock，组件必须能在字段缺失时降级而不是崩溃
+   * （缺失即退化为 RQ-77 的「够 / 不够」两态）。
+   */
+  tier?: CheckupTier;
+  tierLabel?: string;
+  canTrust?: string[];
+  cannotTrust?: string[];
+  /** RQ-80 距下一档还差 N 笔 */
+  progress?: CheckupProgress;
+  /** RQ-80 达标当日提示（仅笔数刚好等于门槛时为 true，可关闭） */
+  milestone?: {
+    justReached: boolean;
+    tierKey?: string;
+    tierLabel?: string;
+    message?: string;
+    cannot?: string;
+    dismissible?: boolean;
+  };
+  /** RQ-85 0 笔冷启动引导 */
+  coldStart?: CheckupColdStart;
+}
+
+/** RQ-79 可信度档位 */
+export interface CheckupTier {
+  key: 'none' | 'behavior' | 'performance' | 'strategy';
+  label: string;
+  short: string;
+  threshold: number;
+  canTrust: string[];
+  cannotTrust: string[];
+  summary: string;
+  reachedTop: boolean;
+  next: { key: string; label: string; short: string; threshold: number } | null;
+  remaining: number;
+  progressPercent: number;
+  sufficient: boolean;
+}
+
+/** RQ-80 升档进度 */
+export interface CheckupProgress {
+  sampleSize: number;
+  tierKey: string;
+  tierLabel: string;
+  nextTierKey: string | null;
+  nextTierLabel: string | null;
+  nextThreshold: number | null;
+  remaining: number;
+  percent: number;
+  reachedTop: boolean;
+  text: string;
+}
+
+/** RQ-85 冷启动引导（0 笔用户） */
+export interface CheckupColdStart {
+  isCold: boolean;
+  title?: string;
+  steps?: string[];
+  sessionsTarget?: number;
+  action?: { label: string; path: string };
+  note?: string;
+}
+
+/** RQ-83 训练处方：体检「最坏习惯」→ 定向训练计划 */
+export interface TrainingPrescription {
+  habitKey: string | null;
+  habitLabel: string | null;
+  habitCost: number | null;
+  tag: 'trend' | 'range' | 'pullback' | 'volatile';
+  tagLabel: string;
+  title: string;
+  why: string;
+  requiredFields: string[];
+  drill: string;
+  sessions: number;
+  bars: number;
+  tierKey: string;
+  sampleSize: number;
+  note: string;
+}
+
+/** RQ-82 片段特征标签 */
+export interface SegmentTag {
+  key: 'trend' | 'range' | 'pullback' | 'volatile';
+  label: string;
+  desc: string;
+}
+
+/** RQ-81 训练粒度 */
+export interface Granularity {
+  key: string;
+  label: string;
+  available: boolean;
+  note: string;
 }
 
 /* ---------------- 双盲训练（RQ-66 / RQ-67 / RQ-38 / RQ-41） ---------------- */

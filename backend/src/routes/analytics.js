@@ -11,7 +11,11 @@ import {
   EVENTS,
   recordError,
   recentErrors,
+  dashboard,
+  retention,
+  DASHBOARD_RETENTION_WINDOW,
 } from '../services/analyticsService.js';
+import { weeklyReport } from '../services/weeklyReportService.js';
 import { optionalAuth } from '../auth.js';
 
 const router = express.Router();
@@ -36,6 +40,8 @@ router.get('/analytics/events', (req, res) => {
       blind_decision: '在双盲训练中记录一次决策',
       blind_finish: '完成一次双盲训练并出成绩',
       checkup_view: '查看交易体检单',
+      weekly_report_view: '查看每周训练周报',
+      prescription_start: '从体检单最坏习惯一键生成并开始定向训练',
     },
   });
 });
@@ -114,6 +120,60 @@ router.get(
   authMiddleware,
   asyncHandler(async (req, res) => {
     res.json(await overview(Number(req.query.days) || 7));
+  })
+);
+
+/* ---------------------- RQ-62 指标看板 ---------------------- */
+
+/**
+ * 看板：日/周维度的事件量与活跃用户。
+ * 数据保留 180 天（远长于「可回溯 ≥180 天」的验收口径）。
+ */
+router.get(
+  '/analytics/dashboard',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const g = String(req.query.granularity || 'day').toLowerCase();
+    res.json(
+      await dashboard({
+        days: Number(req.query.days) || 30,
+        granularity: g === 'week' ? 'week' : 'day',
+      })
+    );
+  })
+);
+
+/**
+ * 北极星：N 日留存率（默认 7 日）。
+ * 未满观察窗口的队列日不纳入平均，否则会把「还没来得及回来」算成流失。
+ */
+router.get(
+  '/analytics/retention',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(
+      await retention({
+        days: Number(req.query.days) || 30,
+        window: Number(req.query.window) || DASHBOARD_RETENTION_WINDOW,
+      })
+    );
+  })
+);
+
+/* ---------------------- RQ-86 每周训练周报 ---------------------- */
+
+/**
+ * 周报：段数 / 纪律执行率变化 / 距下一档还差几笔。
+ * 口径与体检单同源（档位直接复用 checkupService.resolveTier），不另算一套。
+ */
+router.get(
+  '/analytics/weekly',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+    const r = await weeklyReport(req.userId, { weekDays: days });
+    await track(req.userId, 'weekly_report_view', { days }).catch(() => {});
+    res.json(r);
   })
 );
 

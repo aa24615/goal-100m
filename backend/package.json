@@ -11,7 +11,8 @@
     "sync:market": "node src/scripts/syncMarket.js",
     "test": "node --test tests/unit/*.test.js",
     "test:integration": "node --test --test-concurrency=1 --import ./tests/integration/presets.js tests/integration/*.test.js",
-    "test:all": "node --test --test-concurrency=1 --import ./tests/integration/presets.js tests/unit/*.test.js tests/integration/*.test.js"
+    "test:all": "node --test --test-concurrency=1 --import ./tests/integration/presets.js tests/unit/*.test.js tests/integration/*.test.js",
+    "release:check": "node src/scripts/releaseCheck.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

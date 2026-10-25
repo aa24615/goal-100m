@@ -27,6 +27,9 @@ import type {
   BlindScore,
   BlindDecision,
   MaskedBar,
+  TrainingPrescription,
+  SegmentTag,
+  Granularity,
 } from './types';
 
 const api = axios.create({ baseURL: '/api' });
@@ -152,8 +155,35 @@ export const getResetNotice = () =>
 export const resetAccount = (confirm: string) => api.post('/account/reset', { confirm });
 
 /* ---------------- RQ-66/67/38/41 双盲训练 ---------------- */
-export const startBlind = (body?: { bars?: number; liquidOnly?: boolean; code?: string; startSeq?: number; endSeq?: number }) =>
-  api.post<BlindStartResult>('/blind/start', body || {});
+export const startBlind = (body?: {
+  bars?: number;
+  liquidOnly?: boolean;
+  code?: string;
+  startSeq?: number;
+  endSeq?: number;
+  /** RQ-82 片段特征标签：trend / range / pullback / volatile，不传即随机 */
+  tag?: string;
+  /** RQ-81 粒度，当前仅 day 可用 */
+  granularity?: string;
+}) => api.post<BlindStartResult>('/blind/start', body || {});
+
+/** RQ-83 训练处方：由体检单生成定向训练计划 */
+export const buildPrescription = (checkup: unknown) =>
+  api.post<TrainingPrescription>('/blind/prescription', { checkup });
+/** RQ-83 一键开训：生成处方并直接创建会话 */
+export const startPrescription = (checkup: unknown, bars?: number) =>
+  api.post<{ id: number; prescription: TrainingPrescription }>('/blind/prescription/start', { checkup, bars });
+/** RQ-82 片段类型字典 + RQ-81 可用粒度 */
+export const getBlindTags = () =>
+  api.get<{ tags: SegmentTag[]; granularities: Granularity[]; intradayAvailable: boolean }>('/blind/tags');
+/** RQ-62 指标看板 */
+export const getDashboard = (params?: { days?: number; granularity?: 'day' | 'week' }) =>
+  api.get('/analytics/dashboard', { params });
+/** RQ-62 北极星：N 日留存 */
+export const getRetention = (params?: { days?: number; window?: number }) =>
+  api.get('/analytics/retention', { params });
+/** RQ-86 每周训练周报 */
+export const getWeeklyReport = (params?: { days?: number }) => api.get('/analytics/weekly', { params });
 export const getBlind = (id: number) =>
   api.get<{ session: BlindSession; view: BlindView; bars: MaskedBar[] }>(`/blind/${id}`);
 export const stepBlind = (id: number, action: 'next' | 'prev' | 'seek' | 'hold', seq?: number) =>

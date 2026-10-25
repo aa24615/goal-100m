@@ -5,6 +5,17 @@ import { forgotPassword, resetPassword } from '../api';
 
 const { Text, Paragraph } = Typography;
 
+/** 找回密码的申请结果：RQ-90 新增 delivered / channel 字段 */
+interface ForgotResult {
+  message: string;
+  delivered?: boolean;
+  reason?: string;
+  alternatives?: string[];
+  ttlMinutes?: number;
+  notice?: string;
+  devToken?: string;
+}
+
 // RQ-30 密码找回：此前忘记密码即永久失联，只能弃号重开。
 // 流程：申请（邮箱）→ 拿到令牌（生产环境走邮件，开发环境直接返回）→ 设置新密码。
 // 无论邮箱是否注册都返回同一句提示，不泄露账号存在性。
@@ -14,16 +25,19 @@ export default function Forgot() {
   const [step, setStep] = useState(0);
   const [token, setToken] = useState('');
   const [notice, setNotice] = useState('');
+  const [result, setResult] = useState<ForgotResult | null>(null);
   const [loading, setLoading] = useState(false);
 
   const request = async (email: string) => {
     setLoading(true);
     try {
       const r = await forgotPassword(email);
-      setNotice(r.data.message);
+      const data = (r.data || {}) as ForgotResult;
+      setNotice(data.message);
+      setResult(data);
       // 仅开发环境：SMTP 未配置时服务端直接回传令牌，便于本地跑通全流程
-      if (r.data.devToken) {
-        setToken(r.data.devToken);
+      if (data.devToken) {
+        setToken(data.devToken);
         message.info('开发环境未配置 SMTP，已直接返回重置令牌');
       }
       setStep(1);
@@ -56,7 +70,35 @@ export default function Forgot() {
           items={[{ title: '申请重置' }, { title: '设置新密码' }]}
           style={{ marginBottom: 20 }}
         />
-        {notice && <Alert type="success" showIcon message={notice} style={{ marginBottom: 12, fontSize: 12 }} />}
+        {notice && (
+          /* RQ-90 / F-11：邮件没发出去时**绝不能**显示「已发送」——
+             那会让用户一直等一封永远不会来的邮件然后流失。
+             这里按 delivered 分流：失败时给出替代路径与时限，而不是假成功。 */
+          <Alert
+            type={result?.delivered === false ? 'warning' : 'success'}
+            showIcon
+            data-testid="forgot-notice"
+            message={notice}
+            style={{ marginBottom: 12, fontSize: 12 }}
+            description={
+              result?.delivered === false ? (
+                <div>
+                  {result.alternatives && result.alternatives.length > 0 && (
+                    <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
+                      {result.alternatives.map((a) => (
+                        <li key={a}>{a}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {result.ttlMinutes != null && (
+                    <div style={{ marginTop: 4 }}>重置令牌有效期 {result.ttlMinutes} 分钟（自签发起算）。</div>
+                  )}
+                  {result.notice && <div style={{ marginTop: 4 }}>{result.notice}</div>}
+                </div>
+              ) : undefined
+            }
+          />
+        )}
 
         {step === 0 && (
           <Form layout="vertical" onFinish={(v) => request(v.email)}>

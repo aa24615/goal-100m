@@ -13,17 +13,83 @@ import {
   listBlindSessions,
   listBlindDecisions,
   DECISION_INTERVAL,
+  SEGMENT_TAGS,
+  GRANULARITIES,
+  DEFAULT_GRANULARITY,
 } from '../services/blindService.js';
+import { buildPrescription } from '../services/checkupService.js';
 import { track } from '../services/analyticsService.js';
 
 const router = express.Router();
 
+/** RQ-82 片段类型字典 + RQ-81 可用粒度：页面据此渲染筛选项，不硬编码在前端 */
+router.get('/blind/tags', authMiddleware, (req, res) => {
+  res.json({
+    tags: Object.values(SEGMENT_TAGS),
+    granularities: GRANULARITIES,
+    defaultGranularity: DEFAULT_GRANULARITY,
+    // Q6 未确认前分钟级数据不可得，页面必须明示粒度而不是假装支持
+    intradayAvailable: GRANULARITIES.some((g) => g.key !== 'day' && g.available),
+    note: '当前仅日线（day）有真实行情数据；分钟级数据源接入前，其余粒度会返回 400。',
+  });
+});
+
+/**
+ * RQ-83 训练处方：由体检单的「最坏习惯」生成定向训练计划。
+ * 入参 checkup 由前端把 `/review/checkup` 的响应原样带回，
+ * 后端不做二次取数 —— 保证处方依据的就是用户眼前那一份体检单。
+ */
+router.post(
+  '/blind/prescription',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const checkup = req.body?.checkup;
+    if (!checkup || typeof checkup !== 'object') {
+      throw businessError('缺少体检单数据', 400);
+    }
+    res.json(buildPrescription(checkup));
+  })
+);
+
+/**
+ * 由体检单直接开训：处方生成 + 按标签抽取片段一步到位（RQ-83 的「一键」）。
+ * 与 /blind/prescription 的区别是这里会真的创建会话。
+ */
+router.post(
+  '/blind/prescription/start',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const checkup = req.body?.checkup;
+    if (!checkup || typeof checkup !== 'object') {
+      throw businessError('缺少体检单数据', 400);
+    }
+    const p = buildPrescription(checkup);
+    const session = await startBlind({
+      userId: req.userId,
+      bars: Number(req.body?.bars) || p.bars,
+      tag: p.tag,
+      prescriptionKey: p.habitKey || 'default',
+      granularity: req.body?.granularity,
+    });
+    await track(req.userId, 'prescription_start', { sessionId: session.id, habitKey: p.habitKey, tag: p.tag });
+    res.json({
+      id: session.id,
+      alias: session.alias,
+      status: session.status,
+      totalBars: session.end_seq - session.start_seq + 1,
+      decisionInterval: DECISION_INTERVAL,
+      prescription: p,
+    });
+  })
+);
+
 // RQ-67 一键「随机来一段」：不传 code 即随机抽一段真实历史；传了则走定向片段（便于复测）
+// RQ-82 传 tag 即按特征抽取；RQ-81 传 granularity 指定粒度（当前仅 day 可用）
 router.post(
   '/blind/start',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    const { bars, liquidOnly, code, startSeq, endSeq } = req.body || {};
+    const { bars, liquidOnly, code, startSeq, endSeq, tag, granularity } = req.body || {};
     const session = await startBlind({
       userId: req.userId,
       bars,
@@ -31,15 +97,25 @@ router.post(
       code,
       startSeq,
       endSeq,
+      tag,
+      granularity: granularity || DEFAULT_GRANULARITY,
     });
-    await track(req.userId, 'blind_start', { sessionId: session.id, bars: session.end_seq - session.start_seq + 1 });
+    await track(req.userId, 'blind_start', {
+      sessionId: session.id,
+      bars: session.end_seq - session.start_seq + 1,
+      tag: session.segment_tag || null,
+      granularity: session.granularity || DEFAULT_GRANULARITY,
+    });
     // 训练中绝不返回 stock_code / stock_name，也不返回 seq（seq 可对回交易日历 → 日期）
+    // segment_tag 是统计口径不是身份信息，可以返回
     res.json({
       id: session.id,
       alias: session.alias,
       status: session.status,
       totalBars: session.end_seq - session.start_seq + 1,
       decisionInterval: DECISION_INTERVAL,
+      segmentTag: session.segment_tag || null,
+      granularity: session.granularity || DEFAULT_GRANULARITY,
     });
   })
 );
@@ -88,6 +164,10 @@ function toSessionDto(s) {
     score: s.score,
     createdAt: s.created_at,
     finishedAt: s.finished_at,
+    // RQ-82 特征标签 / RQ-81 粒度：均为统计口径，不构成身份泄露
+    segmentTag: s.segment_tag || null,
+    segmentTagLabel: s.segment_tag ? SEGMENT_TAGS[s.segment_tag]?.label || null : null,
+    granularity: s.granularity || DEFAULT_GRANULARITY,
   };
 }
 

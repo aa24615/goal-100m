@@ -34,10 +34,13 @@ import {
   tradeBlind,
   finishBlind,
 } from '../api';
-import type { BlindSession, BlindView, BlindScore, MaskedBar, BlindDecision } from '../types';
+import { Select } from 'antd';
+import type { BlindSession, BlindView, BlindScore, MaskedBar, BlindDecision, SegmentTag, Granularity } from '../types';
 import { track } from '../utils/monitor';
 import Disclaimer from '../components/Disclaimer';
 import { formatMoney, formatNum, formatPct } from '../utils';
+import { useIsMobile } from '../hooks/useIsMobile';
+import api from '../api';
 
 const { Title, Text, Paragraph } = Typography;
 const DECISION_INTERVAL = 10;
@@ -45,6 +48,12 @@ const DECISION_INTERVAL = 10;
 export default function Blind() {
   const navigate = useNavigate();
   const { message, modal } = AntApp.useApp();
+  // RQ-84 手机端：竖屏 / 单手 / 大按钮 / 不横向滚动
+  const isMobile = useIsMobile();
+  // RQ-82 片段类型筛选；RQ-81 粒度明示
+  const [tags, setTags] = useState<SegmentTag[]>([]);
+  const [tag, setTag] = useState<string | undefined>(undefined);
+  const [granularities, setGranularities] = useState<Granularity[]>([]);
   const [session, setSession] = useState<BlindSession | null>(null);
   const [view, setView] = useState<BlindView | null>(null);
   const [bars, setBars] = useState<MaskedBar[]>([]);
@@ -57,6 +66,20 @@ export default function Blind() {
     reason: '',
   });
 
+  // RQ-82 拉取服务端字典而不是把四类标签硬编码在前端，避免前后端口径漂移
+  useEffect(() => {
+    api
+      .get<{ tags: SegmentTag[]; granularities: Granularity[] }>('/blind/tags')
+      .then((r) => {
+        setTags(r.data.tags || []);
+        setGranularities(r.data.granularities || []);
+      })
+      .catch(() => {
+        setTags([]);
+        setGranularities([]);
+      });
+  }, []);
+
   const load = async (id: number) => {
     const r = await getBlind(id);
     setSession(r.data.session);
@@ -67,7 +90,7 @@ export default function Blind() {
   const start = async () => {
     setBusy(true);
     try {
-      const r = await startBlind({ bars: 60 });
+      const r = await startBlind({ bars: 60, tag });
       setSession({
         id: r.data.id,
         alias: r.data.alias,
@@ -158,7 +181,7 @@ export default function Blind() {
   const last = visible[visible.length - 1];
 
   return (
-    <div>
+    <div className={isMobile ? 'blind-mobile' : undefined}>
       <Disclaimer />
       <Card
         title={
@@ -169,7 +192,17 @@ export default function Blind() {
           </Space>
         }
         extra={
-          <Space>
+          <Space wrap>
+            {/* RQ-82 按片段特征定向抽取 */}
+            <Select
+              allowClear
+              placeholder="随机（不限类型）"
+              value={tag}
+              onChange={setTag}
+              style={{ width: isMobile ? 120 : 150 }}
+              options={tags.map((t) => ({ label: t.label, value: t.key }))}
+              data-testid="blind-tag-select"
+            />
             <Button icon={<ThunderboltOutlined />} type="primary" loading={busy} onClick={start} data-testid="blind-start">
               随机来一段
             </Button>
@@ -177,6 +210,19 @@ export default function Blind() {
           </Space>
         }
       >
+        {/* RQ-81 粒度明示：分钟级数据不可得时必须说清楚，不能让用户以为在练日内 */}
+        {granularities.length > 0 && (
+          <Alert
+            type="info"
+            showIcon={false}
+            style={{ marginBottom: 12, fontSize: 12 }}
+            data-testid="blind-granularity-note"
+            message={`当前训练粒度：日线（${granularities
+              .filter((g) => g.available)
+              .map((g) => g.label)
+              .join(' / ')}）。${granularities.find((g) => !g.available)?.note || ''}`}
+          />
+        )}
         {!session && (
           <Alert
             type="info"
@@ -203,20 +249,71 @@ export default function Blind() {
             </Space>
             <Progress percent={Math.round((view.cursorIndex / Math.max(1, view.totalBars)) * 100)} size="small" />
 
-            <Space wrap style={{ margin: '12px 0' }}>
-              <Button onClick={() => step('prev')} disabled={view.cursorIndex <= 1} data-testid="blind-prev">
+            {/* RQ-84 手机端：竖屏下改为纵向大按钮，单手可达，且不产生横向滚动 */}
+            <Space
+              direction={isMobile ? 'vertical' : 'horizontal'}
+              wrap={!isMobile}
+              style={{ margin: '12px 0', width: isMobile ? '100%' : undefined }}
+            >
+              <Button
+                block={isMobile}
+                size={isMobile ? 'large' : 'middle'}
+                onClick={() => step('prev')}
+                disabled={view.cursorIndex <= 1}
+                data-testid="blind-prev"
+              >
                 上一根
               </Button>
-              <Button type="primary" onClick={() => step('next')} disabled={view.atEnd} data-testid="blind-next">
+              <Button
+                block={isMobile}
+                size={isMobile ? 'large' : 'middle'}
+                type="primary"
+                onClick={() => step('next')}
+                disabled={view.atEnd}
+                data-testid="blind-next"
+              >
                 下一根
               </Button>
-              <InputNumber min={100} step={100} value={qty} onChange={(v) => setQty(Number(v) || 100)} />
-              <Button onClick={() => doTrade('BUY')} data-testid="blind-buy">买入</Button>
-              <Button onClick={() => doTrade('SELL')} data-testid="blind-sell">卖出</Button>
-              <Button onClick={() => setDecisionOpen(true)} data-testid="blind-decision-open">
+              <InputNumber
+                min={100}
+                step={100}
+                value={qty}
+                onChange={(v) => setQty(Number(v) || 100)}
+                style={{ width: isMobile ? '100%' : undefined }}
+                size={isMobile ? 'large' : 'middle'}
+              />
+              <Button
+                block={isMobile}
+                size={isMobile ? 'large' : 'middle'}
+                onClick={() => doTrade('BUY')}
+                data-testid="blind-buy"
+              >
+                买入
+              </Button>
+              <Button
+                block={isMobile}
+                size={isMobile ? 'large' : 'middle'}
+                onClick={() => doTrade('SELL')}
+                data-testid="blind-sell"
+              >
+                卖出
+              </Button>
+              <Button
+                block={isMobile}
+                size={isMobile ? 'large' : 'middle'}
+                onClick={() => setDecisionOpen(true)}
+                data-testid="blind-decision-open"
+              >
                 记录决策
               </Button>
-              <Button danger onClick={finish} disabled={session.status === 'FINISHED'} data-testid="blind-finish">
+              <Button
+                block={isMobile}
+                size={isMobile ? 'large' : 'middle'}
+                danger
+                onClick={finish}
+                disabled={session.status === 'FINISHED'}
+                data-testid="blind-finish"
+              >
                 结束并揭示
               </Button>
             </Space>
@@ -228,19 +325,30 @@ export default function Blind() {
               <Statistic title="最大回撤" value={view.maxDrawdown} precision={2} suffix="%" />
             </Space>
 
+            {/* RQ-84 手机端只保留「序号 / 收 / 量」三列：
+                六列在竖屏必然溢出产生横向滚动，而横向滚动会让 K 线与按钮区互相打架。 */}
             <Table
               size="small"
               rowKey="i"
-              pagination={{ pageSize: 8 }}
+              pagination={{ pageSize: isMobile ? 5 : 8, size: isMobile ? 'small' : 'default' }}
               dataSource={visible.slice().reverse()}
-              columns={[
-                { title: '序号', dataIndex: 'i', width: 70 },
-                { title: '开', dataIndex: 'open', render: (v: number) => formatNum(v) },
-                { title: '高', dataIndex: 'high', render: (v: number) => formatNum(v) },
-                { title: '低', dataIndex: 'low', render: (v: number) => formatNum(v) },
-                { title: '收', dataIndex: 'close', render: (v: number) => formatNum(v) },
-                { title: '量', dataIndex: 'volume' },
-              ]}
+              scroll={isMobile ? undefined : undefined}
+              columns={
+                isMobile
+                  ? [
+                      { title: '序号', dataIndex: 'i', width: 60 },
+                      { title: '收', dataIndex: 'close', render: (v: number) => formatNum(v) },
+                      { title: '量', dataIndex: 'volume', render: (v: number) => (v == null ? '—' : v.toLocaleString('zh-CN')) },
+                    ]
+                  : [
+                      { title: '序号', dataIndex: 'i', width: 70 },
+                      { title: '开', dataIndex: 'open', render: (v: number) => formatNum(v) },
+                      { title: '高', dataIndex: 'high', render: (v: number) => formatNum(v) },
+                      { title: '低', dataIndex: 'low', render: (v: number) => formatNum(v) },
+                      { title: '收', dataIndex: 'close', render: (v: number) => formatNum(v) },
+                      { title: '量', dataIndex: 'volume' },
+                    ]
+              }
               locale={{ emptyText: '点击「下一根」开始推进行情' }}
             />
 

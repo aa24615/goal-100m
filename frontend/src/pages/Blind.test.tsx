@@ -51,7 +51,8 @@ const BARS: MaskedBar[] = [
 ];
 
 vi.mock('../api', () => ({
-  default: {},
+  // RQ-82：页面挂载后会拉取「片段类型 + 粒度」字典，默认 axios 实例需要 get 方法
+  default: { get: vi.fn(() => Promise.resolve({ data: { tags: [], granularities: [] } })) },
   startBlind: vi.fn(() =>
     Promise.resolve({ data: { id: 7, alias: '标的 #A1B2', status: 'RUNNING', totalBars: 60, decisionInterval: 10 } })
   ),

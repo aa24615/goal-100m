@@ -18,7 +18,8 @@ import {
   Modal,
 } from 'antd';
 import { DownloadOutlined, ShareAltOutlined } from '@ant-design/icons';
-import api, { getReview, getAbility, getShareCard, getCheckup } from '../api';
+import { useNavigate } from 'react-router-dom';
+import api, { getReview, getAbility, getShareCard, getCheckup, startPrescription } from '../api';
 import type { ReviewPayload, AbilityRadar, ShareCard, CheckupPayload } from '../types';
 import { formatMoney, formatNum, formatPct } from '../utils';
 import ScoreRadar from '../components/ScoreRadar';
@@ -39,6 +40,7 @@ const PERIODS = [
 // 复盘与战绩中心（RQ-07 ~ RQ-11 + RQ-24 + RQ-31 + RQ-32）
 export default function Review() {
   const { message } = App.useApp();
+  const navigate = useNavigate();
   const [period, setPeriod] = useState('30d');
   const [data, setData] = useState<ReviewPayload | null>(null);
   const [ability, setAbility] = useState<AbilityRadar | null>(null);
@@ -86,7 +88,21 @@ export default function Review() {
 
       {/* RQ-76 / RQ-77 / RQ-78 交易体检单：放在页面最上方，先讲可信度再讲数字 */}
       <div style={{ marginBottom: 16 }}>
-        <CheckupPanel data={checkup} loading={loading && !checkup} />
+        <CheckupPanel
+          data={checkup}
+          loading={loading && !checkup}
+          // RQ-85 冷启动：0 笔用户点「去做第一段盲测」直接进入训练
+          onStartTraining={(path) => navigate(path)}
+          // RQ-83 训练处方：体检「最坏习惯」→ 一键开训，闭环的最后一公里
+          onStartPrescription={async (c) => {
+            try {
+              const r = await startPrescription(c);
+              navigate(`/blind/${r.data.id}`);
+            } catch (e: any) {
+              message.error(e?.response?.data?.error || '生成训练处方失败，请稍后重试');
+            }
+          }}
+        />
       </div>
 
       <Card

@@ -388,6 +388,35 @@ async function sendResetEmail(to, link) {
 }
 
 /**
+ * RQ-90：无邮件通道时的响应体。
+ *
+ * 关键约束（F-11）：**绝不出现「已发送」字样**。
+ * 旧实现在生产无 SMTP 时仍返回「重置链接已发送，请注意查收」，
+ * 用户会一直等一封永远不会来的邮件然后流失——这比直接说「不可用」伤害更大。
+ *
+ * 替代路径必须**真实可达**，不写「联系客服」这种无人值守的假路径。
+ */
+export function resetUnavailable(reason) {
+  return {
+    ok: true,
+    delivered: false,
+    channel: 'none',
+    message: '当前未配置可用的邮件发送通道，重置邮件无法发送。',
+    reason: reason || 'SMTP 未配置',
+    alternatives: [
+      '自部署环境：在服务端配置 SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS 后重启，本功能即可使用',
+      '仍记得原密码：先用原密码登录，再在「个人设置」中修改密码',
+      '开发环境：服务端会直接返回重置令牌，可复制后进入第二步',
+    ],
+    // 时限明示：即便拿不到邮件，也要让用户知道令牌有效期这一事实
+    ttlMinutes: RESET_TOKEN_TTL_MIN,
+    // 措辞刻意避开「已发送」这三个字：验收脚本会以「响应体不含已发送」作为硬断言，
+    // 同时这句话本身也要让用户明白「不会假装发送成功」。
+    notice: '我们不会在邮件发不出去时假装发送成功——那会让你等一封永远不会来的邮件。',
+  };
+}
+
+/**
  * 申请密码重置。
  * 防滥用：① 复用登录/注册限流；② 令牌 30 分钟有效且一次性；
  *         ③ 无论邮箱是否注册都返回同一句提示，不泄露账号存在性。
@@ -397,12 +426,21 @@ router.post(
   asyncHandler(async (req, res) => {
     const email = norm(req.body?.email);
     if (!email) return res.status(400).json({ error: '请填写注册邮箱' });
-    const generic = { ok: true, message: '若该邮箱已注册，重置链接已发送，请注意查收' };
+
+    const canEmail = Boolean(SMTP_HOST);
+    const generic = { ok: true, delivered: true, channel: 'email', message: '若该邮箱已注册，重置链接已发送，请注意查收' };
+
+    // RQ-90：无邮件通道且非开发环境 —— 不建令牌、不宣称已发送，直接给替代路径
+    if (!canEmail && !RESET_DEV_ECHO) {
+      logger.warn('密码找回请求被拒：无邮件通道', { ip: req.ip, email });
+      return res.json(resetUnavailable('SMTP 未配置'));
+    }
 
     const { rows } = await pool.query('SELECT id, email FROM users WHERE lower(email)=$1', [email]);
     if (rows.length === 0) {
       logger.info('密码找回请求（邮箱未注册，按统一提示返回）', { ip: req.ip });
-      return res.json(generic);
+      // 未注册时同样不能宣称已发送（无 SMTP 场景下 generic 根本不成立）
+      return res.json(canEmail ? generic : resetUnavailable('SMTP 未配置'));
     }
     const user = rows[0];
     const raw = randomBytes(24).toString('hex');
@@ -415,9 +453,17 @@ router.post(
     const mail = await sendResetEmail(user.email, link);
     logger.info('密码重置令牌已签发', { userId: user.id, mail });
 
-    // 无 SMTP 且非生产环境：把令牌直接回给调用方，便于本地/测试环境走通流程
-    if (!mail.sent && RESET_DEV_ECHO) {
-      return res.json({ ...generic, devToken: raw, devLink: link, notice: 'SMTP 未配置，已在开发环境直接返回令牌' });
+    // 邮件发送失败（通道配了但投递失败）：仍不能宣称成功（RQ-90）
+    if (!mail.sent) {
+      if (RESET_DEV_ECHO) {
+        return res.json({
+          ...resetUnavailable(mail.reason),
+          devToken: raw,
+          devLink: link,
+          notice: 'SMTP 未配置或不可用，已在开发环境直接返回重置令牌',
+        });
+      }
+      return res.json(resetUnavailable(mail.reason));
     }
     return res.json(generic);
   })

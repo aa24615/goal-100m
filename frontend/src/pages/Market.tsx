@@ -163,7 +163,13 @@ export default function Market() {
           size="middle"
           columns={columns}
           dataSource={filtered}
-          pagination={{ pageSize: 15, showSizeChanger: false }}
+          // RQ-89：5576 只标的按 15 条/页需要翻约 370 页，实际上不可用 → 提到 50，并允许切到 100
+          pagination={{
+            pageSize: 50,
+            showSizeChanger: true,
+            pageSizeOptions: [50, 100],
+            showTotal: (t) => `共 ${t} 只标的`,
+          }}
           onRow={(r) => ({ onClick: () => navigate(`/stock/${r.code}`) })}
           locale={{ emptyText: <Empty description="暂无数据" /> }}
         />

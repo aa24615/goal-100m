@@ -17,8 +17,204 @@
 
 import { round2, pct2, shToday } from '../utils/time.js';
 
-/** RQ-77 可信评估所需的最小已平仓笔数 */
+/** RQ-77 可信评估所需的最小已平仓笔数（第一档门槛，保留以兼容既有调用方） */
 export const SAMPLE_THRESHOLD = 50;
+
+/* ------------------------------------------------------------------ *
+ * RQ-79 可信度分档：50 行为级 / 100 绩效级 / 200 策略级               *
+ * ------------------------------------------------------------------ *
+ * 为什么要分档：行业通行口径本就是分档的（30 初步 / 100 可信 / 200+ 显著；
+ * Edgewonk 官方为 5-10 看行为、20-30 看倾向、50-100 看绩效、100+ 才支持策略结论）。
+ * 定死单一 50 一档会让「60 笔」和「500 笔」拿到同样强度的结论，
+ * 属于把统计精度不足包装成确定答案——正好违背 RQ-77 的初衷。
+ *
+ * 每档必须同时给出「能信什么」与「还不能拿它做什么」，
+ * 后者是分档的真正价值：把「数据少」从劣势转成信任资产。
+ */
+export const SAMPLE_TIERS = [
+  {
+    key: 'none',
+    threshold: 0,
+    label: '尚无样本',
+    short: '无样本',
+    canTrust: [],
+    cannotTrust: ['任何胜率、期望值、R 倍数相关的结论'],
+    summary: '还没有完整的买卖回合，先去练几段再来看结论。',
+  },
+  {
+    key: 'behavior',
+    threshold: 50,
+    label: '行为级',
+    short: '行为级',
+    canTrust: [
+      '有没有写交易理由与计划止损（纪律执行率）',
+      '有没有出现「亏损后当日再次交易」这类可观察行为',
+    ],
+    cannotTrust: ['策略层面的期望值与 R 倍数结论', '按持仓时长 / 时段 / 星期的盈亏拆解归因'],
+    summary: '样本够看行为，还不够看绩效。这一档只回答「你怎么做的」，不回答「你的策略行不行」。',
+  },
+  {
+    key: 'performance',
+    threshold: 100,
+    label: '绩效级',
+    short: '绩效级',
+    canTrust: ['期望值（金额）与平均 R 倍数的方向（正 / 负）', '盈利单与亏损单的持仓时间对比'],
+    cannotTrust: ['按维度拆解的归因结论', '据此放大或缩小仓位规模'],
+    summary: '样本够看绩效的方向，还不够做归因。可以看期望值的正负，先别据此改仓位。',
+  },
+  {
+    key: 'strategy',
+    threshold: 200,
+    label: '策略级',
+    short: '策略级',
+    canTrust: ['期望值与 R 倍数的量级', '按持仓时长 / 时段 / 星期的拆解归因'],
+    cannotTrust: ['跨市场、跨品种的外推', '任何形式的收益承诺'],
+    summary: '样本够做策略级归因。拆解维度可以用来决定「改哪一项」，但仍然不构成投资建议。',
+  },
+];
+
+/** 最高档（达到后不再有下一档） */
+export const TOP_TIER = SAMPLE_TIERS[SAMPLE_TIERS.length - 1];
+
+/**
+ * 按已平仓笔数解析可信度档位与「距下一档还差几笔」（RQ-79 + RQ-80）。
+ *
+ * 纯函数：n 为 null / NaN / 负数时一律按 0 处理，
+ * 绝不因为脏数据把复盘页打成 500 或渲染出 NaN。
+ *
+ * @param {number} n 已平仓笔数
+ * @returns {object} { tier, next, reachedTop, remaining, progressPercent, ... }
+ */
+export function resolveTier(n) {
+  const size = Number.isFinite(Number(n)) ? Math.max(0, Math.floor(Number(n))) : 0;
+  let tier = SAMPLE_TIERS[0];
+  for (const t of SAMPLE_TIERS) {
+    if (size >= t.threshold) tier = t;
+  }
+  const idx = SAMPLE_TIERS.indexOf(tier);
+  const next = idx >= 0 && idx < SAMPLE_TIERS.length - 1 ? SAMPLE_TIERS[idx + 1] : null;
+
+  // 区间进度：在「当前档门槛 → 下一档门槛」之间线性推进，
+  // 比「绝对笔数 ÷ 200」更能反映「我还差多少就能升档」。
+  const lo = tier.threshold;
+  const hi = next ? next.threshold : tier.threshold;
+  const span = hi - lo;
+  const progressPercent = !next ? 100 : span > 0 ? Math.min(100, Math.round(((size - lo) / span) * 100)) : 100;
+
+  return {
+    key: tier.key,
+    label: tier.label,
+    short: tier.short,
+    threshold: tier.threshold,
+    canTrust: tier.canTrust,
+    cannotTrust: tier.cannotTrust,
+    summary: tier.summary,
+    reachedTop: !next,
+    next: next ? { key: next.key, label: next.label, short: next.short, threshold: next.threshold } : null,
+    // RQ-80 距下一档还差 N 笔；已到顶档为 0
+    remaining: next ? Math.max(0, next.threshold - size) : 0,
+    progressPercent,
+    // 兼容 RQ-77 的旧字段语义：是否跨过第一档门槛
+    sufficient: size >= SAMPLE_THRESHOLD,
+  };
+}
+
+/**
+ * RQ-85 冷启动：0 笔用户不该看到空面板。
+ * 给出「先做 3 段盲测」的具体动作，而不是一句「还差 50 笔」把人劝退。
+ */
+export const COLD_START = {
+  isCold: true,
+  title: '先做 3 段盲测，体检单就有东西可看了',
+  steps: [
+    '进入双盲训练，随机抽一段真实历史行情（看不到代码、名称与日期）',
+    '每到决策点写一句话：为什么买 / 卖 / 观望，计划止损在哪',
+    '做完 3 段，回来看体检单的前两项指标（纪律执行率与最坏习惯）',
+  ],
+  sessionsTarget: 3,
+  action: { label: '去做第一段盲测', path: '/blind' },
+  note: '体检单不会因为你只有 3 笔就给你结论——它先帮你看清「你是怎么做的」。',
+};
+
+/**
+ * RQ-83 训练处方：把「最坏习惯」翻译成定向训练计划。
+ * 这是竞品全无的闭环——有体检的无训练（Edgewonk / TraderVue），有训练的无体检（绕云 / 爆竹）。
+ *
+ * 映射口径与 RQ-82 的片段标签保持一致，且强制记录项与纪律执行率口径同源
+ * （写了理由或计划止损才计为「已执行」，见 disciplineRate）。
+ */
+export const PRESCRIPTION_MAP = {
+  fee_drag: {
+    tag: 'range',
+    tagLabel: '震荡',
+    title: '过度交易 · 手续费侵蚀',
+    why: '震荡行情里最容易反复进出，正好练「看不懂就不动」。',
+    requiredFields: ['reason', 'stopPlan'],
+    drill: '每段只在决策点操作，其余时间强制观望；段末统计交易笔数是否下降。',
+  },
+  revenge_trade: {
+    tag: 'volatile',
+    tagLabel: '高波动',
+    title: '亏损后当日再次交易',
+    why: '高波动片段会放大情绪，专门练「亏完先停手」。',
+    requiredFields: ['reason', 'stopPlan'],
+    drill: '出现一笔亏损后，本段内禁止再开新仓；必须写清下次进场的触发条件。',
+  },
+  biggest_single_loss: {
+    tag: 'pullback',
+    tagLabel: '回撤',
+    title: '单笔最大亏损',
+    why: '回撤段专练「计划止损先写后做」，避免亏损后加仓。',
+    requiredFields: ['stopPlan'],
+    drill: '开仓前必须填写计划止损价，未填写则本次决策记为未执行。',
+  },
+  losing_streak: {
+    tag: 'volatile',
+    tagLabel: '高波动',
+    title: '最长连亏段',
+    why: '连亏通常伴随仓位放大，高波动片段最容易暴露这个问题。',
+    requiredFields: ['reason', 'stopPlan'],
+    drill: '连亏期间仓位不得超过首笔；每段结束回看连亏是否被截断。',
+  },
+};
+
+/** 无最坏习惯（样本不足 / 全是盈利单）时的默认处方 */
+export const DEFAULT_PRESCRIPTION = {
+  tag: 'trend',
+  tagLabel: '趋势',
+  title: '先建立基线',
+  why: '还没有明确的最坏习惯，先用趋势段建立行为基线。',
+  requiredFields: ['reason'],
+  drill: '每个决策点写一句理由，先把「记录」这个动作练成习惯。',
+};
+
+/**
+ * 由体检单生成训练处方（纯函数）。
+ * @param {object} checkup buildCheckup 的返回值
+ */
+export function buildPrescription(checkup) {
+  const c = checkup && typeof checkup === 'object' ? checkup : {};
+  const habitKey = c.worstHabit?.key || null;
+  const base = (habitKey && PRESCRIPTION_MAP[habitKey]) || DEFAULT_PRESCRIPTION;
+  const tier = resolveTier(c.sampleSize);
+  return {
+    habitKey,
+    habitLabel: c.worstHabit?.label || null,
+    habitCost: c.worstHabit?.cost ?? null,
+    tag: base.tag,
+    tagLabel: base.tagLabel,
+    title: base.title,
+    why: base.why,
+    requiredFields: base.requiredFields,
+    drill: base.drill,
+    // 处方一次给 3 段：单段的偶然性太大，3 段才看得出行为是否重复
+    sessions: 3,
+    bars: 60,
+    tierKey: tier.key,
+    sampleSize: c.sampleSize ?? 0,
+    note: '处方依据本次体检的决定论指标生成，不接任何 AI，结论可回溯到原始成交行。',
+  };
+}
 
 /** 指标口径说明（RQ-78：每项附「说明什么 / 何时该改」一行提示），页面必须原样展示 */
 export const METRIC_HINTS = {
@@ -304,14 +500,18 @@ export function breakdownBy(closed = []) {
  * @param {number} o.initialCapital
  * @returns 样本不足时 `verdict` 为 null、`metrics` 仍给原始数值；绝不输出评级/标签
  */
-export function buildCheckup({ rounds = [], decisions = [], initialCapital = 0 } = {}) {
-  // 默认参数只兜 undefined，兜不住显式传入的 null —— 调用方从 DB 拿不到数据时很容易传 null，
+export function buildCheckup(o) {
+  // 默认参数只兜 undefined，兜不住**整个入参为 null** —— 调用方从 DB 拿不到数据时很容易传 null，
   // 体检单是只读展示，不该因为入参为空把整个复盘页打成 500。
+  // 因此这里不用解构默认值，改为显式判空后再取字段。
+  const { rounds = [], decisions = [], initialCapital = 0 } = o && typeof o === 'object' ? o : {};
   const list = Array.isArray(rounds) ? rounds : [];
   const closed = list.filter((r) => r && r.status !== 'open');
   const sampleSize = closed.length;
   const sufficient = sampleSize >= SAMPLE_THRESHOLD;
   const remaining = Math.max(0, SAMPLE_THRESHOLD - sampleSize);
+  // RQ-79 / RQ-80：分档可信度 + 距下一档进度
+  const tier = resolveTier(sampleSize);
 
   const exp = expectancy(closed);
   const rm = rMultiples(closed, exp.avgLoss);
@@ -349,13 +549,51 @@ export function buildCheckup({ rounds = [], decisions = [], initialCapital = 0 }
   return {
     ...metrics,
     verdict,
+    // ---- RQ-79 可信度分档 ----
+    tier,
+    tierLabel: tier.label,
+    canTrust: tier.canTrust,
+    cannotTrust: tier.cannotTrust,
+    // ---- RQ-80 距下一档进度 + 达标提示 ----
+    progress: {
+      sampleSize,
+      tierKey: tier.key,
+      tierLabel: tier.label,
+      nextTierKey: tier.next?.key ?? null,
+      nextTierLabel: tier.next?.label ?? null,
+      nextThreshold: tier.next?.threshold ?? null,
+      remaining: tier.remaining,
+      percent: tier.progressPercent,
+      reachedTop: tier.reachedTop,
+      text: tier.reachedTop
+        ? `已达最高档（${tier.label}），无需再凑样本。`
+        : `还差 ${tier.remaining} 笔升到「${tier.next.label}」档`,
+    },
+    /**
+     * RQ-80 「达标当日提示」：只在笔数**刚好**落在档位门槛上时为 true，
+     * 前端据此弹一次且可关闭（关闭状态存本地，不污染服务端数据）。
+     * 用「刚好等于门槛」而不是「≥ 门槛」，避免每次刷新都弹。
+     */
+    milestone: SAMPLE_TIERS.some((t) => t.threshold > 0 && sampleSize === t.threshold)
+      ? {
+          justReached: true,
+          tierKey: tier.key,
+          tierLabel: tier.label,
+          message: `已达成 ${sampleSize} 笔，可信度升到「${tier.label}」档。现在可以多信一件事：${tier.canTrust[0] || '—'}`,
+          cannot: `仍然不能拿它做：${tier.cannotTrust[0] || '—'}`,
+          dismissible: true,
+        }
+      : { justReached: false },
+    // ---- RQ-85 冷启动：0 笔不给空面板 ----
+    coldStart: sampleSize === 0 ? { ...COLD_START } : { isCold: false },
     gate: {
       sufficient,
       sampleSize,
       threshold: SAMPLE_THRESHOLD,
       remaining,
+      // 门槛文案升档后仍保留「还差 N 笔」，但改为指向下一档而非永远指向 50
       message: sufficient
-        ? `已达到 ${SAMPLE_THRESHOLD} 笔可信样本门槛，以下结论可采信。`
+        ? `已达到 ${SAMPLE_THRESHOLD} 笔可信样本门槛（当前「${tier.label}」档），以下结论可采信。`
         : `已记录 ${sampleSize} 笔，还差 ${remaining} 笔可生成可信评估。样本不足时不输出结论，是为了不给你不可信的判断。`,
     },
     // 样本不足时前端展示原始流水而非结论
