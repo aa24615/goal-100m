@@ -76,6 +76,18 @@ router.get(
   })
 );
 
+// RQ-76 / RQ-77 / RQ-78 交易体检单：样本门槛 + 5 项决定论指标 + 维度拆解
+router.get(
+  '/review/checkup',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const period = resolvePeriod(req.query.period);
+    const review = await buildReview(req.userId, period, priceMap());
+    await track(req.userId, 'checkup_view', { period, sufficient: Boolean(review.checkup?.sufficient) });
+    res.json(review.checkup);
+  })
+);
+
 // RQ-09 净值曲线叠加同期大盘
 router.get(
   '/review/benchmark',

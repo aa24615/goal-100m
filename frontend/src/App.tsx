@@ -26,6 +26,7 @@ import {
   TrophyOutlined,
   LogoutOutlined,
   UserOutlined,
+  EyeInvisibleOutlined,
   ReloadOutlined,
   FieldTimeOutlined,
   MenuOutlined,
@@ -46,6 +47,7 @@ import Transactions from './pages/Transactions';
 import Leaderboard from './pages/Leaderboard';
 import Profile from './pages/Profile';
 import Replay from './pages/Replay';
+import Blind from './pages/Blind';
 import Review from './pages/Review';
 import Scenarios from './pages/Scenarios';
 import Rooms from './pages/Rooms';
@@ -69,6 +71,7 @@ const NAV_ICONS: Record<string, React.ReactNode> = {
   '/orders': <FieldTimeOutlined />,
   '/transactions': <HistoryOutlined />,
   '/replay': <RedoOutlined />,
+  '/blind': <EyeInvisibleOutlined />,
   '/review': <BookOutlined />,
   '/scenarios': <ExperimentOutlined />,
   '/rooms': <TeamOutlined />,
@@ -396,6 +399,7 @@ function Shell() {
                 <Route path="/orders" element={<Orders />} />
                 <Route path="/transactions" element={<Transactions />} />
                 <Route path="/replay" element={<Replay />} />
+                <Route path="/blind" element={<Blind />} />
                 <Route path="/review" element={<Review />} />
                 <Route path="/scenarios" element={<Scenarios />} />
                 <Route path="/rooms" element={<Rooms />} />

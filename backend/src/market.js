@@ -7,6 +7,7 @@ import {
   startQuoteFeed,
   refreshQuotes,
 } from './services/quoteFeed.js';
+import { classifyBoard, priceLimitOf, haltReason, boardRuleTable } from './rules.js';
 
 /**
  * 行情引擎（重构版）
@@ -207,6 +208,10 @@ export async function loadMarket() {
       name: r.name,
       sector: r.sector,
       shares: Number(r.shares) || sharesOf(r.code, prevClose),
+      // RQ-49/50：板块与停牌判定需要上市日期与交易状态，均取自 stocks 表
+      listingDate: r.listing_date ? String(r.listing_date).slice(0, 10) : null,
+      tradeStatus: r.trade_status ? String(r.trade_status) : null,
+      updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : Date.now(),
       prevClose,
       open,
       price,
@@ -580,7 +585,21 @@ async function syncStocksOnClose() {
 }
 
 // ---------- 查询 ----------
+/**
+ * 行情契约：除价格外同时暴露「这只票按什么规则交易」（RQ-49）与「现在能不能交易」（RQ-50）。
+ * 前端与下单链路共用同一份结论，避免各算各的导致口径漂移。
+ */
 function quoteOf(s) {
+  const board = classifyBoard(s.code, s.name);
+  const limits = priceLimitOf(s.code, s.name, s.prevClose, s.listingDate);
+  const halted = haltReason({
+    code: s.code,
+    price: s.price,
+    prevClose: s.prevClose,
+    volume: s.volume,
+    tradeStatus: s.tradeStatus,
+    quoteAgeMs: Date.now() - (s.updatedAt || Date.now()),
+  });
   return {
     code: s.code,
     name: s.name,
@@ -594,6 +613,16 @@ function quoteOf(s) {
     change: round2(s.price - s.prevClose),
     // 昨收为 0（停牌/无数据）时不能做除法，否则得到 Infinity/NaN 直接污染前端展示
     changePct: s.prevClose > 0 ? round2(((s.price - s.prevClose) / s.prevClose) * 100) : 0,
+    // RQ-49 分板块涨跌幅
+    board,
+    limitUp: limits.limitUp,
+    limitDown: limits.limitDown,
+    dailyLimit: limits.limit,
+    limitExempt: limits.exempt,
+    // RQ-50 停牌/退市：null 表示可交易
+    halted: halted ? { code: halted.code, message: halted.message } : null,
+    tradeStatus: s.tradeStatus || 'NORMAL',
+    listingDate: s.listingDate || null,
   };
 }
 
@@ -648,6 +677,8 @@ export function getMarketStatus() {
     inWindow: REAL_CLOCK ? inTradingWindow() : true,
     tickMs: TICK_MS,
     dailyLimit: DAILY_LIMIT,
+    // RQ-49：全市场不再一刀切 ±10%，下发分板块规则表给前端展示与预校验
+    boardRules: boardRuleTable(),
     // 真实数据相关
     dataSource: 'REAL', // 已切换为真实 A 股行情，不再是随机模拟
     stocks: state.size,

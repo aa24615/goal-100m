@@ -3,7 +3,8 @@ import { authMiddleware } from '../auth.js';
 import { asyncHandler } from '../middleware.js';
 import { logger } from '../logger.js';
 import { getDetail } from '../market.js';
-import { T1_ENABLED, DAILY_LIMIT, PRICE_TOLERANCE } from '../fees.js';
+import { T1_ENABLED, PRICE_TOLERANCE } from '../fees.js';
+import { guardTrade } from '../rules.js';
 import { executeTrade, validateOrder } from '../services/tradeService.js';
 import { getPortfolio } from '../services/portfolioService.js';
 import { listTransactions } from '../services/transactionService.js';
@@ -46,11 +47,34 @@ router.post(
     }
 
     const price = d.price;
+    // RQ-49/50：停牌、退市、无报价、分板块涨跌停统一在此拦截。
+    // 此前全市场一刀切 ±10%（旧 fees.js 常量），在创业板/科创/北交所/ST 标的上
+    // 练出来的是错误肌肉记忆（F-03）；停牌标的还能正常下单成功（F-04）。
+    const guard = guardTrade({
+      code: c,
+      name: d.name,
+      type,
+      price,
+      prevClose: d.prevClose,
+      volume: d.volume,
+      quantity,
+      tradeStatus: d.halted ? 'HALTED' : d.tradeStatus,
+      listingDate: d.listingDate,
+    });
+    if (!guard.ok) {
+      logger.warn('下单被交易规则拒绝', { userId: uid, code: c, type, rule: guard.code });
+      return res.status(guard.status).json({
+        error: guard.message,
+        rule: guard.code,
+        limits: guard.limits,
+      });
+    }
+
     const err = validateOrder({
       type,
       price,
-      limitUp: d.prevClose * (1 + DAILY_LIMIT),
-      limitDown: d.prevClose * (1 - DAILY_LIMIT),
+      limitUp: guard.limits.limitUp,
+      limitDown: guard.limits.limitDown,
       clientPrice,
     });
     if (err) {

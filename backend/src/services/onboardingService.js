@@ -159,6 +159,8 @@ export async function updateGuide(userId, action, step) {
       const e = new Error('引导步序无效');
       e.status = 400;
       e.expose = true;
+      // 业务规则拒绝（步序越界），非报文非法
+      e.business = true;
       throw e;
     }
     guideStep = n;
@@ -170,6 +172,8 @@ export async function updateGuide(userId, action, step) {
     const e = new Error('不支持的引导操作');
     e.status = 400;
     e.expose = true;
+    // 业务规则拒绝（action 不在枚举内），非报文非法
+    e.business = true;
     throw e;
   }
 

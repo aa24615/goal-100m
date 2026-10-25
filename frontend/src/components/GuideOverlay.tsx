@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Modal, Steps, Button, Space, Typography, Alert } from 'antd';
 import { getOnboarding, updateGuide } from '../api';
 import type { OnboardingState } from '../types';
+import { track } from '../utils/monitor';
 
 const { Paragraph, Text } = Typography;
 
@@ -38,6 +39,8 @@ export default function GuideOverlay({ onFinished }: { onFinished?: () => void }
       const r = await updateGuide(action, step);
       setState(r.data);
       if (action === 'skip' || action === 'complete') {
+        // RQ-74：引导完成/跳过都要上报，否则无法衡量引导对首日留存的作用
+        track('guide_complete', { action, step: step ?? null });
         setVisible(false);
         onFinished?.();
       }

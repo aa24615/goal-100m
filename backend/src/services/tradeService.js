@@ -4,7 +4,7 @@
 import pool from '../db.js';
 import { getDetail, addTradeVolume } from '../market.js';
 import { logger } from '../logger.js';
-import { calcFees, T1_ENABLED, PRICE_TOLERANCE, DAILY_LIMIT } from '../fees.js';
+import { calcFees, T1_ENABLED, PRICE_TOLERANCE } from '../fees.js';
 import { shToday, dateStrOf } from '../utils/time.js';
 
 // 可卖数量：T+1 下当日买入部分冻结
@@ -195,10 +195,13 @@ export function validateOrder({ type, price, limitUp, limitDown, clientPrice }) 
       });
     }
   }
-  if (type === 'BUY' && price >= limitUp * 0.999) {
+  // 无涨跌幅限制（新股上市前 N 日 / 昨收缺失）时 limitUp/Down 为 null：必须显式跳过，
+  // 否则 `price >= null * 0.999`（即 >= 0）恒真，所有买单都会被误判为「已涨停」——
+  // 规则放开反而变成全面拒单，与 RQ-49 的意图正好相反。
+  if (Number.isFinite(limitUp) && type === 'BUY' && price >= limitUp * 0.999) {
     return tradeError('已涨停，买单无法成交', 400);
   }
-  if (type === 'SELL' && price <= limitDown * 1.001) {
+  if (Number.isFinite(limitDown) && type === 'SELL' && price <= limitDown * 1.001) {
     return tradeError('已跌停，卖单无法成交', 400);
   }
   return null;

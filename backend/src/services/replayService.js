@@ -10,7 +10,8 @@
 
 import pool from '../db.js';
 import { logger } from '../logger.js';
-import { calcFees, DAILY_LIMIT } from '../fees.js';
+import { calcFees } from '../fees.js';
+import { priceLimitOf } from '../rules.js';
 
 const DEFAULT_CAPITAL = 1000000;
 const MAX_RANGE_BARS = 400; // 单次回放最多允许的 bar 数，防止超大数据量拖垮查询（RK-03）
@@ -27,6 +28,10 @@ export function replayError(message, status, extra) {
   e.status = status;
   e.extra = extra || {};
   e.expose = true;
+  // 标记为业务规则拒绝：否则 errorHandler 会把「T+1 冻结」「委托数量需为整手」
+  // 这类正常业务拒绝记成「请求报文非法(4xx)」，与真正的报文解析失败混在一起，
+  // 让日志无法区分「用户操作被规则挡下」和「接口契约被破坏」。
+  e.business = true;
   return e;
 }
 
@@ -42,8 +47,16 @@ export function replayError(message, status, extra) {
  * @param {Array}    opts.bars  [{ seq, prices: { code: {open,high,low,close,prevClose} } }]
  * @param {Array}    opts.orders [{ seq, code, side, quantity }]（价格取当根 bar 收盘价）
  * @param {number=}  opts.uptoSeq 计算到第几个 bar（倒带即传入更小的 seq）
+ * @param {object=}  opts.stockMeta { code: { name, listingDate } } —— RQ-49 分板块所需，
+ *                   缺省时仍按代码前缀识别板块（ST 需名称，缺名称则按非 ST 处理）
  */
-export function simulateReplay({ initialCapital = DEFAULT_CAPITAL, bars = [], orders = [], uptoSeq = null } = {}) {
+export function simulateReplay({
+  initialCapital = DEFAULT_CAPITAL,
+  bars = [],
+  orders = [],
+  uptoSeq = null,
+  stockMeta = {},
+} = {}) {
   const bySeq = new Map();
   for (const b of bars) bySeq.set(b.seq, b);
   const seqs = [...bySeq.keys()].sort((a, b) => a - b);
@@ -82,13 +95,25 @@ export function simulateReplay({ initialCapital = DEFAULT_CAPITAL, bars = [], or
         continue;
       }
       const prevClose = Number(bar.prices[code]?.prevClose ?? p);
-      const limitUp = prevClose * (1 + DAILY_LIMIT);
-      const limitDown = prevClose * (1 - DAILY_LIMIT);
+      // RQ-49：回放里的涨跌停按板块生效（创/科 ±20%、北交所 ±30%、主板 ST ±5%），
+      // 而不是全市场一刀切 ±10% —— 否则「回放规则一致」这条 RQ-03 是假的。
+      const meta = stockMeta[code] || {};
+      const lim = priceLimitOf(code, meta.name, prevClose, meta.listingDate);
+      const limitUp = lim.limitUp;
+      const limitDown = lim.limitDown;
       const qty = Number(o.quantity);
+
+      // 零成交（停牌日）的 bar 不参与撮合，RQ-50
+      const barVolume = Number(bar.prices[code]?.volume);
+      if (Number.isFinite(barVolume) && barVolume === 0) {
+        rejected.push({ seq, code, side: o.side, quantity: qty, reason: '该交易日零成交（停牌），不可交易' });
+        continue;
+      }
 
       if (o.side === 'BUY') {
         // 与实时盘同一套涨跌停约束：涨停买单不可成交
-        if (p >= limitUp * 0.999) {
+        // limitUp 为 null 表示无涨跌幅限制（新股/昨收缺失），必须跳过而非「>= 0 恒真」
+        if (Number.isFinite(limitUp) && p >= limitUp * 0.999) {
           rejected.push({ seq, code, side: 'BUY', quantity: qty, reason: '已涨停，买单无法成交' });
           continue;
         }
@@ -105,7 +130,7 @@ export function simulateReplay({ initialCapital = DEFAULT_CAPITAL, bars = [], or
         tradeCount += 1;
         trades.push({ seq, code, side: 'BUY', quantity: qty, price: p, amount, fee, realizedPnl: 0 });
       } else {
-        if (p <= limitDown * 1.001) {
+        if (Number.isFinite(limitDown) && p <= limitDown * 1.001) {
           rejected.push({ seq, code, side: 'SELL', quantity: qty, reason: '已跌停，卖单无法成交' });
           continue;
         }
@@ -250,7 +275,7 @@ export async function getReplayRange() {
 
 async function loadBars(startSeq, endSeq) {
   const { rows } = await pool.query(
-    `SELECT seq, code, open, high, low, close, prev_close
+    `SELECT seq, code, open, high, low, close, prev_close, volume
        FROM stock_daily
       WHERE seq BETWEEN $1 AND $2
       ORDER BY seq ASC`,
@@ -265,9 +290,32 @@ async function loadBars(startSeq, endSeq) {
       low: Number(r.low),
       close: Number(r.close),
       prevClose: Number(r.prev_close || r.close),
+      // RQ-50：零成交 bar = 停牌日，回放中不可交易
+      volume: Number(r.volume || 0),
     };
   }
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * 标的元信息（名称 / 上市日期）—— RQ-49 分板块涨跌停需要：
+ * 板块可由代码前缀判定，但 ST（±5%）与新股免涨跌幅只能靠名称与上市日期识别。
+ */
+async function loadStockMeta(codes) {
+  const list = [...new Set(codes.filter(Boolean))];
+  if (list.length === 0) return {};
+  const { rows } = await pool.query(
+    'SELECT code, name, listing_date FROM stocks WHERE code = ANY($1::text[])',
+    [list]
+  );
+  const meta = {};
+  for (const r of rows) {
+    meta[r.code] = {
+      name: r.name,
+      listingDate: r.listing_date ? String(r.listing_date).slice(0, 10) : null,
+    };
+  }
+  return meta;
 }
 
 async function loadOrders(sessionId) {
@@ -290,11 +338,13 @@ export async function rebuildState(session, uptoSeq) {
   const bars = await loadBars(session.start_seq, session.end_seq);
   const orders = await loadOrders(session.id);
   const cursor = uptoSeq ?? session.cursor_seq;
+  const metaCodes = [...bars.flatMap((b) => Object.keys(b.prices)), ...orders.map((o) => o.code)];
   const state = simulateReplay({
     initialCapital: Number(session.initial_capital),
     bars,
     orders,
     uptoSeq: cursor,
+    stockMeta: await loadStockMeta(metaCodes),
   });
   state.cursorSeq = cursor;
   state.startSeq = session.start_seq;
@@ -435,11 +485,14 @@ export async function tradeInReplay({ userId, sessionId, code, side, quantity })
 
   // 先用「试算」验证规则是否放行：未通过的写入 rejected，不落流水
   const orders = await loadOrders(session.id);
+  const fullBars = await loadBars(session.start_seq, session.end_seq);
+  const metaCodes = [...fullBars.flatMap((b) => Object.keys(b.prices)), ...orders.map((o) => o.code), c];
   const trial = simulateReplay({
     initialCapital: Number(session.initial_capital),
-    bars: await loadBars(session.start_seq, session.end_seq),
+    bars: fullBars,
     orders: [...orders, { seq: session.cursor_seq, code: c, side: s, quantity: q }],
     uptoSeq: session.cursor_seq,
+    stockMeta: await loadStockMeta(metaCodes),
   });
   const rejectedHere = trial.rejected.filter((r) => r.seq === session.cursor_seq);
   if (rejectedHere.length > 0) {

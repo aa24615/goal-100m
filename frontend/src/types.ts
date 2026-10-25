@@ -125,6 +125,20 @@ export interface MarketSummary {
   indexPct: number;
 }
 
+/** RQ-47 / RQ-57 行情数据源状态（后端 quoteFeedStatus） */
+export interface QuoteFeedStatus {
+  size: number;
+  lastFetchAt: string | null;
+  staleForMs: number | null;
+  stale: boolean;
+  interrupted: boolean;
+  lastError: string | null;
+  source: string;
+  polls: number;
+  pollMs: number;
+  idleMs: number;
+}
+
 export interface MarketStatus {
   tradeSeq: number;
   tradeDate: string;
@@ -135,8 +149,19 @@ export interface MarketStatus {
   breakLeft: number;
   realClock: boolean;
   inWindow: boolean;
+  inTradingWindow?: boolean;
   tickMs: number;
   dailyLimit: number;
+  /** RQ-49 分板块涨跌停规则表 */
+  boardRules?: {
+    boards: Record<string, { label: string; limit: number }>;
+    stLimit: number;
+    newListingExemptDays: number;
+  };
+  dataSource?: string;
+  stocks?: number;
+  /** RQ-47：数据源状态，前端据此展示更新时间与中断提示 */
+  quote?: QuoteFeedStatus;
 }
 
 /* ---------------- 回放训练（RQ-01 ~ RQ-06） ---------------- */
@@ -403,4 +428,186 @@ export interface WatchItem {
 export interface Preferences {
   theme: 'light' | 'dark';
   density: 'compact' | 'normal' | 'loose';
+}
+
+/* ---------------- 交易体检单（RQ-76 / RQ-77 / RQ-78） ---------------- */
+
+export interface MetricHint {
+  label: string;
+  meaning: string;
+  whenToChange: string;
+  formula: string;
+}
+
+export interface CheckupGate {
+  sufficient: boolean;
+  sampleSize: number;
+  threshold: number;
+  remaining: number;
+  message: string;
+}
+
+export interface CheckupVerdict {
+  hasEdge: boolean;
+  grade: 'positive' | 'negative';
+  summary: string;
+  disclaimer: string;
+}
+
+export interface BreakdownGroup {
+  key: string;
+  label: string;
+  count: number;
+  pnl: number;
+  sellIds: Array<number | string>;
+}
+
+export interface CheckupBreakdown {
+  byHold: BreakdownGroup[];
+  byWeekday: BreakdownGroup[];
+  bySession: BreakdownGroup[];
+  bySource: BreakdownGroup[];
+}
+
+export interface CheckupPayload {
+  sampleSize: number;
+  threshold: number;
+  sufficient: boolean;
+  remaining: number;
+  expectancy: {
+    amount: number;
+    r: number | null;
+    avgWin: number;
+    avgLoss: number;
+    winRate: number;
+    lossRate: number;
+    winCount: number;
+    lossCount: number;
+    grossProfit: number;
+    grossLoss: number;
+    hint: MetricHint;
+  };
+  expectancyR: { value: number | null; hint: MetricHint };
+  rMultiple: {
+    avgR: number | null;
+    count: number;
+    list: Array<{ sellId: number | string | null; code: string; r: number; planned: boolean }>;
+    hint: MetricHint;
+  };
+  holdTime: {
+    winHoldDays: number | null;
+    lossHoldDays: number | null;
+    ratio: number | null;
+    winCount: number;
+    lossCount: number;
+    hint: MetricHint;
+  };
+  discipline: {
+    rate: number | null;
+    total: number;
+    recorded: number;
+    skipped: number;
+    note: string;
+    hint: MetricHint;
+  };
+  worstHabit:
+    | {
+        key: string;
+        label: string;
+        cost: number;
+        detail: string;
+        alternatives: Array<{ key: string; label: string; cost: number; detail: string }>;
+        hint: MetricHint;
+      }
+    | null;
+  verdict: CheckupVerdict | null;
+  gate: CheckupGate;
+  rawRounds: Array<Record<string, unknown>>;
+  breakdown: CheckupBreakdown;
+}
+
+/* ---------------- 双盲训练（RQ-66 / RQ-67 / RQ-38 / RQ-41） ---------------- */
+
+/** 遮蔽后的 K 线：只有相对序号与 OHLCV，不含代码与日期 */
+export interface MaskedBar {
+  i: number;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number;
+}
+
+export interface BlindStartResult {
+  id: number;
+  alias: string;
+  status: string;
+  // 只给长度，不给 seq —— seq 可对回交易日历从而推出日期
+  totalBars: number;
+  decisionInterval: number;
+}
+
+export interface BlindSession {
+  id: number;
+  alias: string;
+  // 未结束时为 null —— 界面不得通过任何途径推断标的身份
+  code: string | null;
+  name: string | null;
+  status: string;
+  // 未结束为 null（同 RQ-66：不得泄露可反查日期的序号）
+  startSeq: number | null;
+  endSeq: number | null;
+  totalBars?: number;
+  cursorSeq?: number | null;
+  score?: BlindScore | null;
+  createdAt?: string;
+  finishedAt?: string | null;
+  revealed?: boolean;
+}
+
+export interface BlindView {
+  id: number;
+  alias: string;
+  status: string;
+  cursorIndex: number;
+  totalBars: number;
+  capital: number;
+  cash: number;
+  positions: Array<Record<string, unknown>>;
+  trades: Array<Record<string, unknown>>;
+  rejected: Array<Record<string, unknown>>;
+  equity: Array<{ i: number; cash: number; marketValue: number; totalAssets: number }>;
+  realizedTotal: number;
+  feeTotal: number;
+  tradeCount: number;
+  maxDrawdown: number;
+  atEnd: boolean;
+  decisionPoints: number[];
+  decisions?: BlindDecision[];
+  revealed?: { code: string; name: string; startSeq: number; endSeq: number } | null;
+}
+
+export interface BlindDecision {
+  id: number;
+  seq: number;
+  action: 'BUY' | 'SELL' | 'HOLD';
+  reason: string | null;
+  stopPlan: number | null;
+  skipped: boolean;
+  createdAt?: string;
+}
+
+export interface BlindScore {
+  returnPct: number;
+  totalAssets: number;
+  maxDrawdown: number;
+  tradeCount: number;
+  durationSec: number | null;
+  decisionPoints: number;
+  disciplineRate: number | null;
+  discipline: { rate: number | null; total: number; recorded: number; skipped: number; note: string };
+  sampleNote: string;
+  realizedTotal: number;
+  feeTotal: number;
+  disclaimer: string;
 }

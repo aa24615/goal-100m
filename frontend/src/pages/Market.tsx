@@ -1,17 +1,32 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Table, Input, Select, Tag, Button, Space, Row, Col, Card, Empty } from 'antd';
 import { StarOutlined, StarFilled, SearchOutlined } from '@ant-design/icons';
 import { useWatchlist } from '../hooks/useWatchlist';
 import { useMarket } from '../hooks/useMarket';
 import StatCard from '../components/StatCard';
-import type { StockQuote } from '../types';
+import TrainingHub from '../components/TrainingHub';
+import type { StockQuote, MarketStatus } from '../types';
 import { formatNum, formatPct, changeClass } from '../utils';
+import api from '../api';
 
 export default function Market() {
   const navigate = useNavigate();
   const { watch, toggle } = useWatchlist();
   const { quotes, sectors, summary } = useMarket();
+  const [status, setStatus] = useState<MarketStatus | null>(null);
+
+  // RQ-47 / RQ-57：数据源状态可见。中断时页面必须明确提示，不能静默停更。
+  useEffect(() => {
+    const load = () =>
+      api
+        .get<MarketStatus>('/market/status')
+        .then((r) => setStatus(r.data))
+        .catch(() => setStatus(null));
+    load();
+    const t = window.setInterval(load, 60000);
+    return () => window.clearInterval(t);
+  }, []);
   const [keyword, setKeyword] = useState('');
   const [sector, setSector] = useState<string>('全部');
 
@@ -86,8 +101,23 @@ export default function Market() {
     },
   ];
 
+  // RQ-57：数据源中断（连续失败）时传 null，训练中枢据此显示明确提示；
+  // 仅「滞后」不算中断，仍展示更新时间。
+  const quoteUpdatedAt = useMemo(() => {
+    const q = status?.quote as { lastFetchAt?: string | null; interrupted?: boolean } | undefined;
+    if (!q || q.interrupted || !q.lastFetchAt) return null;
+    const ms = new Date(q.lastFetchAt).getTime();
+    return Number.isNaN(ms) ? null : ms;
+  }, [status]);
+  const quoteSource = (status?.quote as { source?: string } | undefined)?.source;
+
   return (
     <div>
+      <TrainingHub
+        inSession={Boolean(status?.inWindow ?? status?.inTradingWindow ?? true)}
+        lastUpdatedAt={quoteUpdatedAt}
+        sourceLabel={quoteSource}
+      />
       <Row gutter={16} align="stretch" style={{ marginBottom: 16 }}>
         <Col span={6}>
           <StatCard

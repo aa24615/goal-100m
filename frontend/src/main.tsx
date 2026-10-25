@@ -5,7 +5,12 @@ import { ConfigProvider, App as AntApp } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import App from './App';
 import { AuthProvider } from './auth';
+import { installGlobalErrorHandlers } from './utils/monitor';
 import './index.css';
+
+// RQ-75：越早安装越好——App 挂载期间的崩溃也要能被看见，
+// 装晚了就漏掉「白屏」这一类最严重、也最该被上报的错误。
+installGlobalErrorHandlers();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

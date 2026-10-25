@@ -20,6 +20,7 @@ import onboardingRoutes from './routes/onboarding.js';
 import scenarioRoutes from './routes/scenario.js';
 import roomRoutes from './routes/rooms.js';
 import analyticsRoutes from './routes/analytics.js';
+import blindRoutes from './routes/blind.js';
 import { matchOrders } from './orders.js';
 import { loadMarket, startMarket, setBroadcaster, getSnapshot, onTick } from './market.js';
 import { seedStocks } from './seed.js';
@@ -100,6 +101,7 @@ export function createApp() {
   app.use('/api', scenarioRoutes);
   app.use('/api', roomRoutes);
   app.use('/api', analyticsRoutes);
+  app.use('/api', blindRoutes);
 
   // 兜底中间件必须放在所有路由之后：记录 404 与未捕获异常
   app.use(notFoundHandler);

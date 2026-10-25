@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { Card, Tabs, Form, Input, Button, Typography, App, Divider } from 'antd';
 import { useAuth } from '../auth';
 import Forgot from './Forgot';
+// RQ-51/RQ-72：口径统一取自常量，页面不再写字面量（否则三处必然再度漂移）
+import { DATA_SOURCE_STATEMENT } from '../constants';
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -100,13 +102,14 @@ export default function Login() {
               模 拟 股 票
             </div>
             <Paragraph style={{ color: '#476b68', fontSize: 15 }}>
-              零风险练盘感，百万模拟金起步。真实的 A 股风格行情、买卖撮合、持仓盈亏与收益排行榜，
-              让你在虚拟环境中打磨交易纪律与策略。
+              零风险练盘感，百万模拟金起步。真实 A 股公开行情 + 模拟撮合、持仓盈亏与收益排行榜，
+              让练过的东西能迁移到真实市场。
             </Paragraph>
             <Divider style={{ borderColor: 'rgba(13,148,136,0.25)' }} />
             <Paragraph style={{ color: '#5f807d', fontSize: 13 }}>
-              · 注册即赠 ¥1,000,000 虚拟资金<br />
-              · 实时模拟行情（±10% 涨跌停）<br />
+              · 注册即赠 ¥1,000,000 模拟资金<br />
+              · 真实 A 股行情，涨跌停按板块（主板 ±10% / 创业板·科创板 ±20% / 北交所 ±30% / 主板 ST ±5%）<br />
+              · 停牌与退市标的不可交易，下单即给出原因<br />
               · 多用户同台竞技，收益排行榜见真章<br />
               · 佣金 / 印花税 / 过户费全仿真
             </Paragraph>
@@ -207,7 +210,7 @@ export default function Login() {
               ]}
             />
             <Text type="secondary" style={{ display: 'block', textAlign: 'center', fontSize: 12 }}>
-              本平台为模拟交易，所有资金与行情均为虚拟，不涉及任何真实交易。
+              真实 A 股行情 · 模拟资金与模拟交易 · 不涉及任何真实交易，不构成投资建议。
             </Text>
           </Card>
         </div>
@@ -223,7 +226,9 @@ export default function Login() {
           <a href="#" onClick={(e) => e.preventDefault()}>风险揭示</a>
           <a href="#" onClick={(e) => e.preventDefault()}>联系我们</a>
         </div>
-        <div style={{ opacity: 0.8 }}>© {new Date().getFullYear()} 模拟股票实验室 · 虚拟资金 ¥1,000,000 起</div>
+        <div style={{ opacity: 0.8 }}>
+          © {new Date().getFullYear()} 模拟股票实验室 · 模拟资金 ¥1,000,000 起 · {DATA_SOURCE_STATEMENT}
+        </div>
       </footer>
     </div>
   );

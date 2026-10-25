@@ -323,6 +323,8 @@ export async function getScenarioBars(key) {
     const e = new Error('剧本不存在');
     e.status = 404;
     e.expose = true;
+    // 「剧本不存在」是业务规则拒绝，不是报文非法：不打标记会污染 4xx 分类统计
+    e.business = true;
     throw e;
   }
   const d = rows[0];
@@ -351,6 +353,8 @@ export async function submitAttempt({ userId, key, trades = [] }) {
     const e = new Error('剧本不存在');
     e.status = 404;
     e.expose = true;
+    // 同上：业务规则拒绝
+    e.business = true;
     throw e;
   }
   const def = rows[0];

@@ -20,6 +20,13 @@ import type {
   WatchItem,
   MarketStatus,
   DailyBar,
+  CheckupPayload,
+  BlindStartResult,
+  BlindSession,
+  BlindView,
+  BlindScore,
+  BlindDecision,
+  MaskedBar,
 } from './types';
 
 const api = axios.create({ baseURL: '/api' });
@@ -143,6 +150,25 @@ export const getResetNotice = () =>
     impact: string[];
   }>('/account/reset/notice');
 export const resetAccount = (confirm: string) => api.post('/account/reset', { confirm });
+
+/* ---------------- RQ-66/67/38/41 双盲训练 ---------------- */
+export const startBlind = (body?: { bars?: number; liquidOnly?: boolean; code?: string; startSeq?: number; endSeq?: number }) =>
+  api.post<BlindStartResult>('/blind/start', body || {});
+export const getBlind = (id: number) =>
+  api.get<{ session: BlindSession; view: BlindView; bars: MaskedBar[] }>(`/blind/${id}`);
+export const stepBlind = (id: number, action: 'next' | 'prev' | 'seek' | 'hold', seq?: number) =>
+  api.post<{ view: BlindView; bars: MaskedBar[] }>(`/blind/${id}/step`, { action, seq });
+export const submitDecision = (id: number, data: { action: 'BUY' | 'SELL' | 'HOLD'; reason?: string; stopPlan?: number; skipped?: boolean }) =>
+  api.post<{ id: number; skipped: boolean }>(`/blind/${id}/decision`, data);
+export const listDecisions = (id: number) => api.get<BlindDecision[]>(`/blind/${id}/decisions`);
+export const tradeBlind = (id: number, side: 'BUY' | 'SELL', quantity: number) =>
+  api.post<{ ok: boolean; view: BlindView; bars: MaskedBar[] }>(`/blind/${id}/trade`, { side, quantity });
+export const finishBlind = (id: number) =>
+  api.post<{ session: BlindSession; score: BlindScore; view: BlindView }>(`/blind/${id}/finish`);
+export const listBlind = (limit = 20) => api.get<BlindSession[]>('/blind/history', { params: { limit } });
+
+/* ---------------- RQ-76/77/78 交易体检单 ---------------- */
+export const getCheckup = (period = '30d') => api.get<CheckupPayload>('/review/checkup', { params: { period } });
 
 /* ---------------- RQ-35 埋点 ---------------- */
 export const trackEvent = (event: string, payload?: Record<string, unknown>) =>

@@ -40,6 +40,7 @@ import type { DailyBar, ReplaySession, ReplayState, ReplayScore } from '../types
 import { formatMoney, formatNum, formatPct } from '../utils';
 import KLineChart from '../components/KLineChart';
 import Disclaimer from '../components/Disclaimer';
+import { track } from '../utils/monitor';
 import { REPLAY_SPEEDS } from '../constants';
 
 const { Title, Text } = Typography;
@@ -127,6 +128,8 @@ export default function Replay() {
       setState(r.data.state);
       setScore(null);
       setMarks([]);
+      // RQ-74 埋点：真实节点上报（此前全仓 0 处调用，北极星指标不可观测）
+      track('replay_start', { startSeq: bounds[0], endSeq: bounds[1], capital });
     } catch (e: any) {
       message.error(e?.response?.data?.error || '创建回放失败');
     } finally {
@@ -168,6 +171,11 @@ export default function Replay() {
       setHistory(h.data);
       const c = await compareReplays(session.startSeq, session.endSeq);
       setCompare(c.data);
+      track('replay_finish', {
+        sessionId: session.id,
+        returnPct: r.data.score?.returnPct ?? null,
+        tradeCount: r.data.score?.tradeCount ?? 0,
+      });
     } catch (e: any) {
       message.error(e?.response?.data?.error || '生成成绩失败');
     }

@@ -5,9 +5,10 @@ import { createApp } from '../../src/index.js';
 import pool from '../../src/db.js';
 import { runMigrations } from '../../src/migrate.js';
 import { seedStocks } from '../../src/seed.js';
-import { loadMarket, forceNextSession } from '../../src/market.js';
+import { loadMarket } from '../../src/market.js';
 import { seedScenarios } from '../../src/services/scenarioService.js';
 import { resetDb } from './resetDb.js';
+import { seedHistoryBars } from './seedHistory.js';
 
 let server;
 let base;
@@ -20,9 +21,12 @@ before(async () => {
   await runMigrations(pool);
   await seedStocks();
   await seedScenarios();
+  // 回放需要「至少两个已落库的交易日」。真实行情模式下 forceNextSession() 不再推进交易日
+  // （凭空造开盘价无意义，行为改为刷新真实快照），测试库因此只有 1 根 K 线，
+  // RQ-01 ~ RQ-05 的用例全挂在「区间过短」上。这里直接播种 40 个交易日的历史。
+  // 顺带省掉 3 次真实行情抓取（此前单条用例耗时 63 秒）。
+  await seedHistoryBars(pool, { days: 40 });
   await loadMarket();
-  // 回放需要「至少两个已落库的交易日」：压缩模式下默认只有 1 个 seq，这里推进几个
-  for (let i = 0; i < 3; i += 1) await forceNextSession();
 
   const app = createApp();
   await new Promise((resolve) => {

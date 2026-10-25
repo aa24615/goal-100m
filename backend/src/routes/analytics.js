@@ -3,7 +3,16 @@
 import express from 'express';
 import { authMiddleware } from '../auth.js';
 import { asyncHandler, businessError } from '../middleware.js';
-import { track, statsByDay, overview, isValidEvent, EVENTS } from '../services/analyticsService.js';
+import {
+  track,
+  statsByDay,
+  overview,
+  isValidEvent,
+  EVENTS,
+  recordError,
+  recentErrors,
+} from '../services/analyticsService.js';
+import { optionalAuth } from '../auth.js';
 
 const router = express.Router();
 
@@ -23,6 +32,10 @@ router.get('/analytics/events', (req, res) => {
       checkin: '每日练习打卡',
       export_review: '导出复盘报告',
       share_card: '生成战绩分享卡',
+      blind_start: '开始一次双盲训练',
+      blind_decision: '在双盲训练中记录一次决策',
+      blind_finish: '完成一次双盲训练并出成绩',
+      checkup_view: '查看交易体检单',
     },
   });
 });
@@ -39,6 +52,53 @@ router.post(
 );
 
 // 按日统计（需要登录，避免暴露全站数据）
+/* ---------------------- RQ-75 前端运行时错误上报 ---------------------- */
+
+/**
+ * 错误上报**不强制登录**：白屏/崩溃经常发生在 token 尚未注入或已失效的时刻，
+ * 若要求鉴权，最该被看见的那一类错误反而一条都收不到。
+ * 用 optionalAuth 尽力带上 userId，拿不到就记匿名。
+ *
+ * 同时做体积限制：body 里的超长文本会被截断，避免把整个页面 DOM 塞进数据库。
+ */
+router.post(
+  '/analytics/error',
+  optionalAuth,
+  asyncHandler(async (req, res) => {
+    const b = req.body || {};
+    const kind = String(b.kind || 'error').slice(0, 24);
+    if (!['error', 'unhandledrejection', 'manual'].includes(kind)) {
+      throw businessError('未知的上报类型', 400);
+    }
+    const hasContent =
+      (b.message && String(b.message).trim()) || (b.stack && String(b.stack).trim()) || (b.name && String(b.name).trim());
+    if (!hasContent) throw businessError('缺少错误信息', 400);
+
+    const r = await recordError({
+      userId: req.userId ?? null,
+      kind,
+      name: b.name,
+      message: b.message,
+      stack: b.stack,
+      url: b.url,
+      userAgent: b.userAgent,
+      appVersion: b.appVersion,
+      context: b.context,
+    });
+    // 上报侧不需要知道内容，只回 OK；计数与排障走下面的查询接口
+    res.json({ ok: true, fingerprint: r.fingerprint });
+  })
+);
+
+// 排障查询：按指纹聚合最近的前端错误（需登录，避免暴露全站错误明细）
+router.get(
+  '/analytics/errors',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(await recentErrors({ days: Number(req.query.days) || 7, limit: Number(req.query.limit) || 50 }));
+  })
+);
+
 router.get(
   '/analytics/stats',
   authMiddleware,

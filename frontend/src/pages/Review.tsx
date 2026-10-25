@@ -18,11 +18,14 @@ import {
   Modal,
 } from 'antd';
 import { DownloadOutlined, ShareAltOutlined } from '@ant-design/icons';
-import api, { getReview, getAbility, getShareCard } from '../api';
-import type { ReviewPayload, AbilityRadar, ShareCard } from '../types';
+import api, { getReview, getAbility, getShareCard, getCheckup } from '../api';
+import type { ReviewPayload, AbilityRadar, ShareCard, CheckupPayload } from '../types';
 import { formatMoney, formatNum, formatPct } from '../utils';
 import ScoreRadar from '../components/ScoreRadar';
+import CheckupPanel from '../components/CheckupPanel';
 import Disclaimer from '../components/Disclaimer';
+import { track } from '../utils/monitor';
+import { SAMPLE_THRESHOLD } from '../constants';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -41,6 +44,7 @@ export default function Review() {
   const [ability, setAbility] = useState<AbilityRadar | null>(null);
   const [card, setCard] = useState<ShareCard | null>(null);
   const [loading, setLoading] = useState(false);
+  const [checkup, setCheckup] = useState<CheckupPayload | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -48,12 +52,18 @@ export default function Review() {
       .then(([r, a]) => {
         setData(r.data);
         setAbility(a.data);
+        // RQ-74：复盘查看是全站最关键的复访行为之一
+        track('review_view', { period });
       })
       .catch(() => {
         setData(null);
         setAbility(null);
       })
       .finally(() => setLoading(false));
+    // RQ-76/77：体检单与复盘同页展示，样本门槛由后端裁决
+    getCheckup(period)
+      .then((r) => setCheckup(r.data))
+      .catch(() => setCheckup(null));
   }, [period]);
 
   const exportUrl = (fmt: 'csv' | 'html') => `/api/review/export?format=${fmt}&period=${period}`;
@@ -73,6 +83,11 @@ export default function Review() {
   return (
     <div>
       <Disclaimer />
+
+      {/* RQ-76 / RQ-77 / RQ-78 交易体检单：放在页面最上方，先讲可信度再讲数字 */}
+      <div style={{ marginBottom: 16 }}>
+        <CheckupPanel data={checkup} loading={loading && !checkup} />
+      </div>
 
       <Card
         title="周期战绩卡"

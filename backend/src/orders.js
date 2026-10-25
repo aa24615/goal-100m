@@ -2,7 +2,8 @@ import pool from './db.js';
 import { getDetail } from './market.js';
 import { logger } from './logger.js';
 import { executeTrade } from './services/tradeService.js';
-import { calcFees, DAILY_LIMIT } from './fees.js';
+import { calcFees } from './fees.js';
+import { guardTrade, priceLimitOf } from './rules.js';
 
 /**
  * 限价委托（挂单 / 撤单 / 撮合）
@@ -49,9 +50,26 @@ export async function createOrder({ userId, code, side, limitPrice, quantity }) 
     return { error: '委托数量需为 100 的整数倍', status: 400 };
   }
 
-  const hi = d.prevClose * (1 + DAILY_LIMIT);
-  const lo = d.prevClose * (1 - DAILY_LIMIT);
-  const limit = Math.round(Math.min(hi, Math.max(lo, price)) * 100) / 100;
+  // RQ-49/50：与市价单共用 rules.guardTrade 口径（分板块涨跌幅 + 停牌 + 整手）
+  const guard = guardTrade({
+    code: c,
+    name: d.name,
+    type: side,
+    price,
+    prevClose: d.prevClose,
+    volume: d.volume,
+    quantity,
+    tradeStatus: d.halted ? 'HALTED' : d.tradeStatus,
+    listingDate: d.listingDate,
+  });
+  if (!guard.ok) return { error: guard.message, status: guard.status, rule: guard.code };
+
+  const { limitUp, limitDown } = guard.limits;
+  // 有涨跌幅约束时把越界委托价夹回区间（前端可能按旧价提交）；免涨跌幅时原样保留
+  const limit =
+    limitUp != null && limitDown != null
+      ? Math.round(Math.min(limitUp, Math.max(limitDown, price)) * 100) / 100
+      : Math.round(price * 100) / 100;
 
   // 下单即预估资金/持仓是否足够，提前拦截明显不可能成交的委托
   const u = await pool.query('SELECT cash FROM users WHERE id=$1', [userId]);
@@ -137,11 +155,12 @@ async function doMatchOrders() {
       (o.side === 'SELL' && Number(o.limit_price) <= market);
     if (!canFill) continue;
 
-    // 涨停买 / 跌停卖 依然不可成交
-    const hi = d.prevClose * (1 + DAILY_LIMIT);
-    const lo = d.prevClose * (1 - DAILY_LIMIT);
-    if (o.side === 'BUY' && market >= hi * 0.999) continue;
-    if (o.side === 'SELL' && market <= lo * 1.001) continue;
+    // 涨停买 / 跌停卖 依然不可成交（按分板块幅度，RQ-49）
+    const lim = priceLimitOf(o.stock_code, d.name, d.prevClose, d.listingDate);
+    const halted = d.halted;
+    if (halted) continue; // 停牌/退市标的即使价格触发也不撮合（RQ-50）
+    if (Number.isFinite(lim.limitUp) && o.side === 'BUY' && market >= lim.limitUp * 0.999) continue;
+    if (Number.isFinite(lim.limitDown) && o.side === 'SELL' && market <= lim.limitDown * 1.001) continue;
 
     // 原子占位：先把委托抢成 FILLED，只有抢占成功（此前确实还是 PENDING）才真正成交。
     // 修复前这里是 executeTrade 成功扣款后才无条件 UPDATE 置位，有两个后果：

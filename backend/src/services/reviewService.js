@@ -9,6 +9,7 @@
 import pool from '../db.js';
 import { createHash } from 'node:crypto';
 import { round2, pct2 } from '../utils/time.js';
+import { buildCheckup } from './checkupService.js';
 
 export const DISCLAIMER = '本报告基于你的模拟交易行为做统计诊断，仅用于学习复盘，不构成投资建议，不承诺任何收益。';
 
@@ -392,6 +393,32 @@ async function recentIndexPct(days) {
   return a > 0 ? pct2(((b - a) / a) * 100) : 0;
 }
 
+/**
+ * 用户在本周期内的决策记录（RQ-38），用于纪律执行率（RQ-76）。
+ * blind_decisions 表由迁移 0016 创建；早期环境缺失时静默降级。
+ */
+async function loadUserDecisions(userId, days) {
+  try {
+    const args = [userId];
+    let sql = `SELECT d.reason, d.stop_plan, d.skipped
+                 FROM blind_decisions d
+                 JOIN blind_sessions s ON s.id = d.session_id
+                WHERE s.user_id = $1`;
+    if (days > 0) {
+      sql += ' AND d.created_at >= now() - ($2 || \' days\')::interval';
+      args.push(String(days));
+    }
+    const { rows } = await pool.query(sql, args);
+    return rows.map((r) => ({
+      reason: r.reason,
+      stopPlan: r.stop_plan === null ? null : Number(r.stop_plan),
+      skipped: Boolean(r.skipped),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 /** 复盘总览：配对交易 + 战绩卡 + AI 报告（带 fingerprint 缓存，保证 ≤10s 且内容稳定） */
 export async function buildReview(userId, periodRaw, priceMap = {}) {
   const period = resolvePeriod(periodRaw);
@@ -467,6 +494,12 @@ export async function buildReview(userId, periodRaw, priceMap = {}) {
   const dbRealized = list.reduce((s, t) => s + (t.type === 'SELL' ? Number(t.realizedPnl || 0) : 0), 0);
   const consistent = Math.abs(dbRealized - realizedSum) <= 0.01;
 
+  // RQ-76/77/78 交易体检单：与 scorecard 同源（同一份 rounds），保证两套指标可对账。
+  // 决策记录来自双盲训练（RQ-38）；表缺失或查询失败时退化为「无决策记录」而非抛错，
+  // 因为体检单的非决策项（期望值/R/持仓时间/最坏习惯）不依赖它。
+  const decisions = await loadUserDecisions(userId, days);
+  const checkup = buildCheckup({ rounds, decisions, initialCapital });
+
   const payload = {
     period,
     days,
@@ -481,6 +514,7 @@ export async function buildReview(userId, periodRaw, priceMap = {}) {
     rounds: rounds.slice(0, 200),
     scorecard,
     report,
+    checkup,
   };
 
   const fingerprint = createHash('sha256')

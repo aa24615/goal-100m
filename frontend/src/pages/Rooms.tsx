@@ -4,6 +4,7 @@ import { createRoom, joinRoom, listRooms, getRoom, closeRoom } from '../api';
 import type { Room, RoomDetail } from '../types';
 import { formatMoney } from '../utils';
 import Disclaimer from '../components/Disclaimer';
+import { track } from '../utils/monitor';
 
 const DURATIONS = [
   { label: '1 个交易日', value: '1d' },
@@ -48,6 +49,7 @@ export default function Rooms() {
     try {
       const r = await createRoom(v.name, v.duration);
       message.success(`房间已创建，邀请码 ${r.data.code}`);
+      track('room_create', { roomId: r.data.id });
       setCreating(false);
       form.resetFields();
       load();
@@ -61,6 +63,7 @@ export default function Rooms() {
     try {
       const r = await joinRoom(code);
       message.success('已加入房间赛');
+      track('room_join', { roomId: r.data.id });
       load();
       const d = await getRoom(r.data.id);
       setDetail(d.data);

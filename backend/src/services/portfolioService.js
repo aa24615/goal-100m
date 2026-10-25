@@ -12,6 +12,8 @@ export async function getPortfolio(uid) {
     const e = new Error('用户不存在');
     e.status = 404;
     e.expose = true;
+    // 业务规则拒绝，非报文非法
+    e.business = true;
     throw e;
   }
   const cash = Number(u.rows[0].cash);

@@ -33,6 +33,9 @@ export function roomError(message, status) {
   const e = new Error(message);
   e.status = status;
   e.expose = true;
+  // 同 replayError：房间类拒绝（邀请码无效、非房主、已加入）都是业务规则，
+  // 不打 business 标记会被记成「请求报文非法(4xx)」。
+  e.business = true;
   return e;
 }
 

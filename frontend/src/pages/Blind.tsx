@@ -1,0 +1,335 @@
+/**
+ * 双盲训练场（RQ-66 双盲 / RQ-67 随机来一段 / RQ-38 强制决策记录 / RQ-41 成绩）
+ *
+ * 界面硬约束（验收标准）：**训练全程不得出现标的代码 / 名称 / 日期**。
+ * 因此本页只渲染后端返回的 `alias` 与相对序号，不订阅行情快照、不跳个股详情，
+ * 也不使用任何带 code 的字段——包括持仓与成交列表（后端已按 alias 覆盖）。
+ */
+
+import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Card,
+  Button,
+  Space,
+  Tag,
+  Typography,
+  InputNumber,
+  Radio,
+  Input,
+  Modal,
+  Progress,
+  Alert,
+  Statistic,
+  Divider,
+  Table,
+  App as AntApp,
+} from 'antd';
+import { ThunderboltOutlined, EyeInvisibleOutlined, EyeOutlined } from '@ant-design/icons';
+import {
+  startBlind,
+  getBlind,
+  stepBlind,
+  submitDecision,
+  tradeBlind,
+  finishBlind,
+} from '../api';
+import type { BlindSession, BlindView, BlindScore, MaskedBar, BlindDecision } from '../types';
+import { track } from '../utils/monitor';
+import Disclaimer from '../components/Disclaimer';
+import { formatMoney, formatNum, formatPct } from '../utils';
+
+const { Title, Text, Paragraph } = Typography;
+const DECISION_INTERVAL = 10;
+
+export default function Blind() {
+  const navigate = useNavigate();
+  const { message, modal } = AntApp.useApp();
+  const [session, setSession] = useState<BlindSession | null>(null);
+  const [view, setView] = useState<BlindView | null>(null);
+  const [bars, setBars] = useState<MaskedBar[]>([]);
+  const [score, setScore] = useState<BlindScore | null>(null);
+  const [qty, setQty] = useState(100);
+  const [busy, setBusy] = useState(false);
+  const [decisionOpen, setDecisionOpen] = useState(false);
+  const [decision, setDecision] = useState<{ action: 'BUY' | 'SELL' | 'HOLD'; reason: string; stopPlan?: number }>({
+    action: 'HOLD',
+    reason: '',
+  });
+
+  const load = async (id: number) => {
+    const r = await getBlind(id);
+    setSession(r.data.session);
+    setView(r.data.view);
+    setBars(r.data.bars);
+  };
+
+  const start = async () => {
+    setBusy(true);
+    try {
+      const r = await startBlind({ bars: 60 });
+      setSession({
+        id: r.data.id,
+        alias: r.data.alias,
+        code: null,
+        name: null,
+        status: r.data.status,
+        startSeq: null,
+        endSeq: null,
+        totalBars: r.data.totalBars,
+      });
+      setScore(null);
+      await load(r.data.id);
+      message.success('已随机抽取一段真实历史行情，标的与日期已隐藏');
+    } catch (e: any) {
+      message.error(e?.response?.data?.error || '生成盲测片段失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 每推进到决策点，弹出决策记录（可跳过，但记为「未记录」→ 计入纪律执行率）
+  useEffect(() => {
+    if (!view || view.atEnd) return;
+    const atPoint = view.cursorIndex > 0 && (view.cursorIndex - 1) % DECISION_INTERVAL === 0;
+    if (atPoint && !view.decisions?.some((d: BlindDecision) => d.seq === 0)) {
+      // 用「已记录条数 < 应到决策点数」判断是否需要补记，避免重复弹窗
+      const expected = Math.floor((view.cursorIndex - 1) / DECISION_INTERVAL) + 1;
+      const recorded = view.decisions?.length || 0;
+      if (recorded < expected) setDecisionOpen(true);
+    }
+  }, [view]);
+
+  const step = async (action: 'next' | 'prev') => {
+    if (!session) return;
+    try {
+      const r = await stepBlind(session.id, action);
+      setView(r.data.view);
+      setBars(r.data.bars);
+    } catch (e: any) {
+      message.error(e?.response?.data?.error || '推进失败');
+    }
+  };
+
+  const doTrade = async (side: 'BUY' | 'SELL') => {
+    if (!session) return;
+    try {
+      const r = await tradeBlind(session.id, side, qty);
+      setView(r.data.view);
+      setBars(r.data.bars);
+      message.success(`${side === 'BUY' ? '买入' : '卖出'} ${qty} 股`);
+    } catch (e: any) {
+      message.error(e?.response?.data?.error || '下单失败');
+    }
+  };
+
+  const doDecision = async (skipped: boolean) => {
+    if (!session) return;
+    try {
+      await submitDecision(session.id, {
+        action: decision.action,
+        reason: skipped ? '' : decision.reason,
+        stopPlan: decision.stopPlan,
+        skipped,
+      });
+      track('blind_decision', { skipped });
+      setDecisionOpen(false);
+      setDecision({ action: 'HOLD', reason: '' });
+      await load(session.id);
+    } catch (e: any) {
+      message.error(e?.response?.data?.error || '记录失败');
+    }
+  };
+
+  const finish = async () => {
+    if (!session) return;
+    try {
+      const r = await finishBlind(session.id);
+      setScore(r.data.score);
+      setSession(r.data.session);
+      setView(r.data.view);
+      message.success('训练结束，已揭示标的身份');
+    } catch (e: any) {
+      message.error(e?.response?.data?.error || '生成成绩失败');
+    }
+  };
+
+  const visible = bars.filter((b) => b.i <= (view?.cursorIndex ?? 0));
+  const last = visible[visible.length - 1];
+
+  return (
+    <div>
+      <Disclaimer />
+      <Card
+        title={
+          <Space>
+            <EyeInvisibleOutlined />
+            <span>双盲训练 · {session ? session.alias : '未开始'}</span>
+            {session && <Tag color={session.status === 'FINISHED' ? 'default' : 'blue'}>{session.status === 'FINISHED' ? '已结束' : '进行中'}</Tag>}
+          </Space>
+        }
+        extra={
+          <Space>
+            <Button icon={<ThunderboltOutlined />} type="primary" loading={busy} onClick={start} data-testid="blind-start">
+              随机来一段
+            </Button>
+            <Button onClick={() => navigate('/replay')}>回放训练</Button>
+          </Space>
+        }
+      >
+        {!session && (
+          <Alert
+            type="info"
+            showIcon
+            message="怎么练？"
+            description="系统会随机抽取一段真实 A 股历史行情，隐藏标的代码、名称与日期，只给你 K 线与成交量。每 10 根 K 线会要求你记录一次判断（买/卖/观望 + 理由 + 计划止损），结束后完整揭示并给出「你当时的判断 vs 事后走势」。"
+          />
+        )}
+
+        {session && view && (
+          <>
+            <Space wrap style={{ marginBottom: 12 }}>
+              <Tag icon={<EyeInvisibleOutlined />} color="blue" data-testid="blind-alias">
+                {view.alias}（身份已隐藏）
+              </Tag>
+              <Text type="secondary">
+                进度 {view.cursorIndex} / {view.totalBars} 根
+              </Text>
+              {last && last.close != null && (
+                <Text strong data-testid="blind-last-close">
+                  最新 ¥{formatNum(last.close)}
+                </Text>
+              )}
+            </Space>
+            <Progress percent={Math.round((view.cursorIndex / Math.max(1, view.totalBars)) * 100)} size="small" />
+
+            <Space wrap style={{ margin: '12px 0' }}>
+              <Button onClick={() => step('prev')} disabled={view.cursorIndex <= 1} data-testid="blind-prev">
+                上一根
+              </Button>
+              <Button type="primary" onClick={() => step('next')} disabled={view.atEnd} data-testid="blind-next">
+                下一根
+              </Button>
+              <InputNumber min={100} step={100} value={qty} onChange={(v) => setQty(Number(v) || 100)} />
+              <Button onClick={() => doTrade('BUY')} data-testid="blind-buy">买入</Button>
+              <Button onClick={() => doTrade('SELL')} data-testid="blind-sell">卖出</Button>
+              <Button onClick={() => setDecisionOpen(true)} data-testid="blind-decision-open">
+                记录决策
+              </Button>
+              <Button danger onClick={finish} disabled={session.status === 'FINISHED'} data-testid="blind-finish">
+                结束并揭示
+              </Button>
+            </Space>
+
+            <Space size="large" wrap style={{ marginBottom: 12 }}>
+              <Statistic title="现金" value={view.cash} precision={2} prefix="¥" />
+              <Statistic title="交易次数" value={view.tradeCount} />
+              <Statistic title="已实现盈亏" value={view.realizedTotal} precision={2} prefix="¥" />
+              <Statistic title="最大回撤" value={view.maxDrawdown} precision={2} suffix="%" />
+            </Space>
+
+            <Table
+              size="small"
+              rowKey="i"
+              pagination={{ pageSize: 8 }}
+              dataSource={visible.slice().reverse()}
+              columns={[
+                { title: '序号', dataIndex: 'i', width: 70 },
+                { title: '开', dataIndex: 'open', render: (v: number) => formatNum(v) },
+                { title: '高', dataIndex: 'high', render: (v: number) => formatNum(v) },
+                { title: '低', dataIndex: 'low', render: (v: number) => formatNum(v) },
+                { title: '收', dataIndex: 'close', render: (v: number) => formatNum(v) },
+                { title: '量', dataIndex: 'volume' },
+              ]}
+              locale={{ emptyText: '点击「下一根」开始推进行情' }}
+            />
+
+            {view.decisions && view.decisions.length > 0 && (
+              <>
+                <Divider orientation="left">决策记录</Divider>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {view.decisions.map((d) => (
+                    <Text key={d.id} type={d.skipped ? 'secondary' : undefined}>
+                      · 第 {d.seq} 根：{d.action === 'BUY' ? '买' : d.action === 'SELL' ? '卖' : '观望'}
+                      {d.skipped ? '（未记录）' : ` —— ${d.reason}`}
+                    </Text>
+                  ))}
+                </Space>
+              </>
+            )}
+          </>
+        )}
+
+        {score && (
+          <>
+            <Divider orientation="left">
+              <Space>
+                <EyeOutlined /> 已揭示
+              </Space>
+            </Divider>
+            <Alert
+              type="success"
+              showIcon
+              style={{ marginBottom: 12 }}
+              data-testid="blind-reveal"
+              message={`这段行情来自 ${session?.name}（${session?.code}）`}
+              description={`日期区间对应 K 线序号 ${session?.startSeq} ~ ${session?.endSeq}，可在回放训练中按同一区间复盘。`}
+            />
+            <Space size="large" wrap>
+              <Statistic title="收益率" value={score.returnPct} precision={2} suffix="%" valueStyle={{ color: score.returnPct >= 0 ? '#e0584f' : '#2fa06a' }} />
+              <Statistic title="最大回撤" value={score.maxDrawdown} precision={2} suffix="%" />
+              <Statistic title="交易次数" value={score.tradeCount} />
+              <Statistic title="用时" value={score.durationSec ?? 0} suffix="秒" />
+              <Statistic
+                title="纪律执行率"
+                value={score.disciplineRate == null ? '—' : score.disciplineRate}
+                precision={score.disciplineRate == null ? 0 : 2}
+                suffix={score.disciplineRate == null ? '' : '%'}
+              />
+            </Space>
+            <Paragraph type="secondary" style={{ marginTop: 8, fontSize: 12 }}>
+              {score.sampleNote}
+            </Paragraph>
+            <Paragraph type="secondary" style={{ fontSize: 12 }}>
+              纪律执行率 = 已写理由或计划止损的决策点 ÷ 全部决策点。{score.disclaimer}
+            </Paragraph>
+          </>
+        )}
+      </Card>
+
+      <Modal
+        open={decisionOpen}
+        title="记录这一刻的判断"
+        onCancel={() => doDecision(true)}
+        okText="提交"
+        cancelText="跳过（记为未记录）"
+        onOk={() => doDecision(false)}
+        data-testid="blind-decision-modal"
+      >
+        <Radio.Group
+          value={decision.action}
+          onChange={(e) => setDecision((d) => ({ ...d, action: e.target.value }))}
+          style={{ marginBottom: 12 }}
+        >
+          <Radio value="BUY">买</Radio>
+          <Radio value="SELL">卖</Radio>
+          <Radio value="HOLD">观望</Radio>
+        </Radio.Group>
+        <Input.TextArea
+          rows={3}
+          placeholder="为什么这么做？（必填；不写会被记为「未记录」，影响纪律执行率）"
+          value={decision.reason}
+          onChange={(e) => setDecision((d) => ({ ...d, reason: e.target.value }))}
+        />
+        <InputNumber
+          style={{ marginTop: 12, width: '100%' }}
+          placeholder="计划止损价（选填）"
+          min={0}
+          step={0.01}
+          value={decision.stopPlan}
+          onChange={(v) => setDecision((d) => ({ ...d, stopPlan: v == null ? undefined : Number(v) }))}
+        />
+      </Modal>
+    </div>
+  );
+}
