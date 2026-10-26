@@ -13,6 +13,7 @@
 import pool from '../db.js';
 import { logger } from '../logger.js';
 import { simulateReplay } from './replayService.js';
+import { clampLimit } from '../utils/num.js';
 import { buildCheckup, buildPrescription, disciplineRate, SAMPLE_THRESHOLD } from './checkupService.js';
 import { round2, pct2 } from '../utils/time.js';
 
@@ -708,7 +709,7 @@ export async function listBlindSessions(userId, limit = 20) {
     `SELECT id, alias, stock_code, stock_name, start_seq, end_seq, status, score, created_at, finished_at,
             segment_tag, granularity, prescription_key
        FROM blind_sessions WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2`,
-    [userId, Math.min(100, Number(limit) || 20)]
+    [userId, clampLimit(limit, 100, 20)]
   );
   return rows.map((r) => ({
     id: r.id,

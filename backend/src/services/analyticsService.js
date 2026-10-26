@@ -4,6 +4,7 @@
 
 import pool from '../db.js';
 import { logger } from '../logger.js';
+import { clampLimit } from '../utils/num.js';
 
 export const EVENTS = [
   'replay_start',
@@ -157,7 +158,7 @@ export async function recentErrors({ days = 7, limit = 50 } = {}) {
       GROUP BY fingerprint
       ORDER BY cnt DESC, last_at DESC
       LIMIT $2`,
-    [String(d), Math.min(200, Number(limit) || 50)]
+    [String(d), clampLimit(limit, 200, 50)]
   );
   return {
     days: d,

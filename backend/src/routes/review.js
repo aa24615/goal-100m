@@ -4,6 +4,7 @@ import express from 'express';
 import { authMiddleware } from '../auth.js';
 import { asyncHandler, businessError } from '../middleware.js';
 import pool from '../db.js';
+import { clampInt } from '../utils/num.js';
 import { getSnapshot } from '../market.js';
 import {
   buildReview,
@@ -146,8 +147,11 @@ router.get(
   '/transactions/export',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    const size = Math.min(10000, Number(req.query.size) || 1000);
-    const data = await listTransactions(req.userId, 1, size);
+    // 导出上限刻意高于分页场景（listTransactions 默认按「一页」封顶 50 条，
+    // 若沿用默认值，导出会被静默截断，与这里最大 10000 的意图不符）
+    const EXPORT_MAX_SIZE = 10000;
+    const size = clampInt(req.query.size, 1, EXPORT_MAX_SIZE, 1000);
+    const data = await listTransactions(req.userId, 1, size, EXPORT_MAX_SIZE);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="transactions.csv"');
     res.send(transactionsCsv(data.items));
