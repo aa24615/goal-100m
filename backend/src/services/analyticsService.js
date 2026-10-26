@@ -27,6 +27,19 @@ export const EVENTS = [
   'weekly_report_view',
   // RQ-83 训练处方：从体检单点击「练这个」
   'prescription_start',
+  // RQ-91 断点续做：续做与放弃分别计数，用来区分「回来了」和「彻底不来了」
+  'blind_resume',
+  'blind_abandon',
+  // RQ-92 首训直达：首训引导的开始与首次决策
+  'first_training_start',
+  'first_training_decision',
+  // RQ-94 看板与周报入口落地后，入口点击本身要可观测
+  'dashboard_view',
+  // RQ-99 成绩卡生成与复制
+  'score_card_view',
+  'score_card_copy',
+  // RQ-105 获客归因：注册事件携带渠道
+  'signup',
 ];
 
 const RETENTION_DAYS = 180;

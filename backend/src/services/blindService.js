@@ -124,6 +124,49 @@ export function isValidTag(tag) {
   return Object.prototype.hasOwnProperty.call(SEGMENT_TAGS, String(tag || '').toLowerCase());
 }
 
+/* ------------------------------------------------------------------ *
+ * RQ-101 前后端标签与参数字典唯一源                                    *
+ * ------------------------------------------------------------------ *
+ * F-25 的直接成因：标签字典存在 `sideways` 与 `range` 两种写法，
+ * 一侧按 `range` 发、另一侧按 `sideways` 收，于是每次调用都吃一个 400，
+ * 真实问题被噪声淹没——**日志不可读就等于没有日志**。
+ *
+ * 处理原则：**归一而不是拒绝**。历史写法是兼容问题，不是用户错误，
+ * 把它折算成规范值即可，没必要让用户为一个拼写差异买单。
+ * 真正非法的标签仍然 400，但错误信息里会列出规范值。
+ */
+export const SEGMENT_TAG_ALIASES = {
+  sideways: 'range',
+  shock: 'range',
+  oscillation: 'range',
+  box: 'range',
+  uptrend: 'trend',
+  downtrend: 'trend',
+  drawdown: 'pullback',
+  retracement: 'pullback',
+  highvol: 'volatile',
+  volatility: 'volatile',
+};
+
+/**
+ * 把任意历史写法折算成规范标签；无法识别返回 null。
+ * 纯函数，可单测；null / 非字符串一律返回 null。
+ */
+export function normalizeSegmentTag(tag) {
+  if (tag == null) return null;
+  const raw = String(tag).trim().toLowerCase();
+  if (!raw) return null;
+  if (Object.prototype.hasOwnProperty.call(SEGMENT_TAGS, raw)) return raw;
+  if (Object.prototype.hasOwnProperty.call(SEGMENT_TAG_ALIASES, raw)) return SEGMENT_TAG_ALIASES[raw];
+  return null;
+}
+
+/** 标签解析结果：{ ok, tag } —— 调用方据此决定「归一」还是「报错」 */
+export function resolveSegmentTag(tag) {
+  const norm = normalizeSegmentTag(tag);
+  return norm ? { ok: true, tag: norm } : { ok: false, tag: null, allowed: Object.keys(SEGMENT_TAGS) };
+}
+
 /** 取某标的某区间的收盘价（升序），仅用于特征分类 */
 async function loadCloses(code, startSeq, endSeq) {
   const { rows } = await pool.query(
@@ -259,8 +302,10 @@ export function decisionPointsOf(session) {
  */
 export async function pickRandomSegment({ bars = DEFAULT_BARS, liquidOnly = true, tag = null } = {}) {
   const n = clampBars(bars);
-  // RQ-82 按标签抽取：非法标签直接拒绝，避免静默退化为「随机」后用户以为自己在定向练
-  const wantTag = isValidTag(tag) ? String(tag).toLowerCase() : null;
+  // RQ-82 按标签抽取：非法标签直接拒绝，避免静默退化为「随机」后用户以为自己在定向练。
+  // RQ-101 先做归一化：历史写法（sideways 等）折算为规范标签，不再产生 400 噪声。
+  const resolved = resolveSegmentTag(tag);
+  const wantTag = resolved.ok ? resolved.tag : null;
   if (tag && !wantTag) {
     throw blindError(`未知的片段类型：${String(tag)}（可选 ${Object.keys(SEGMENT_TAGS).join(' / ')}）`, 400);
   }
@@ -534,8 +579,136 @@ export async function stepBlind(userId, sessionId, action = 'next', seq = null) 
     next = s.cursor_seq;
   } else throw blindError('未知的步进动作', 400);
 
-  await pool.query('UPDATE blind_sessions SET cursor_seq=$1 WHERE id=$2', [next, s.id]);
+  await pool.query('UPDATE blind_sessions SET cursor_seq=$1, last_active_at=now() WHERE id=$2', [next, s.id]);
   return getBlindSession(userId, s.id);
+}
+
+/* ------------------------------------------------------------------ *
+ * RQ-91 训练会话持久化与断点续做                                      *
+ * ------------------------------------------------------------------ *
+ * v8 实地复核：`blind_sessions` 序列已用至 4，**表内 0 行**——
+ * 开始了 4 次训练，一次进度都没留下（F-17）。碎片时间训练（通勤 / 休市）
+ * 一旦被打断就前功尽弃，而且**没有任何提示告知会丢失**。
+ *
+ * 落库本身在 startBlind 里就做了（INSERT ... RETURNING），缺的是两件事：
+ *   ① 一个「我上次练到哪了」的查询入口；
+ *   ② 一句明确的断点提示（「上次停在第 N 根」）。
+ * 这里补的就是这两件，并且把提示文案做成纯函数，好让它能被单测直接验收。
+ */
+
+/**
+ * 断点提示（纯函数）。
+ *
+ * @param {object|null} session blind_sessions 行
+ * @returns {object} { resumable, sessionId, cursorIndex, totalBars, text, ... }
+ */
+export function buildResumeHint(session) {
+  const s = session && typeof session === 'object' ? session : null;
+  const empty = { resumable: false, reason: '没有可续做的训练', text: '' };
+  if (!s) return empty;
+
+  const startSeq = Number(s.start_seq);
+  const endSeq = Number(s.end_seq);
+  const cursorSeq = Number(s.cursor_seq);
+  if (!Number.isFinite(startSeq) || !Number.isFinite(endSeq) || !Number.isFinite(cursorSeq)) return empty;
+
+  const totalBars = Math.max(0, endSeq - startSeq + 1);
+  // 夹到 [1, totalBars]：脏数据（游标越界）不该让页面渲染出「第 -3 根」
+  const cursorIndex = Math.min(Math.max(1, cursorSeq - startSeq + 1), Math.max(1, totalBars));
+  const finished = String(s.status || '').toUpperCase() === 'FINISHED';
+
+  if (finished) {
+    return {
+      ...empty,
+      sessionId: s.id ?? null,
+      reason: '上一次训练已结束',
+      totalBars,
+      cursorIndex,
+    };
+  }
+
+  return {
+    resumable: true,
+    sessionId: s.id ?? null,
+    alias: s.alias || null,
+    status: s.status || 'RUNNING',
+    cursorIndex,
+    totalBars,
+    percent: totalBars > 0 ? Math.round((cursorIndex / totalBars) * 100) : 0,
+    // 验收标准原文口径：「上次停在第 N 根」
+    text: `上次停在第 ${cursorIndex} 根（共 ${totalBars} 根），可以继续。`,
+    updatedAt: s.last_active_at || s.created_at || null,
+    actions: {
+      resume: { label: '继续训练', path: `/blind?session=${s.id ?? ''}` },
+      abandon: { label: '放弃这段', path: `/blind?abandon=${s.id ?? ''}` },
+    },
+  };
+}
+
+/** 取当前用户最近一个未结束的会话（断点续做的取数入口） */
+export async function findResumableSession(userId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM blind_sessions
+      WHERE user_id=$1 AND status='RUNNING'
+      ORDER BY COALESCE(last_active_at, created_at) DESC
+      LIMIT 1`,
+    [userId]
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/** 断点续做：返回可直接渲染的会话 + 提示；没有可续做的内容时 resumable=false */
+export async function resumeBlind(userId) {
+  const s = await findResumableSession(userId);
+  if (!s) return { resumable: false, hint: buildResumeHint(null), session: null, view: null, bars: null };
+  const r = await getBlindSession(userId, s.id);
+  return {
+    resumable: true,
+    hint: buildResumeHint(s),
+    session: toResumeDto(s),
+    view: r ? r.view : null,
+    bars: r ? r.maskedBars : null,
+  };
+}
+
+/** 放弃这段训练：标记为 ABANDONED，之后的续做查询不再命中它 */
+export async function abandonBlind(userId, sessionId) {
+  const { rows } = await pool.query(
+    `UPDATE blind_sessions SET status='ABANDONED', last_active_at=now()
+      WHERE id=$1 AND user_id=$2 AND status='RUNNING' RETURNING *`,
+    [sessionId, userId]
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/** 续做接口返回的会话 DTO：与 toSessionDto 同口径，未结束不暴露身份 */
+function toResumeDto(s) {
+  return {
+    id: s.id,
+    alias: s.alias,
+    status: s.status,
+    code: null,
+    name: null,
+    startSeq: null,
+    endSeq: null,
+    cursorSeq: null,
+    totalBars: s.end_seq - s.start_seq + 1,
+    cursorIndex: s.cursor_seq - s.start_seq + 1,
+    score: s.score,
+    createdAt: s.created_at,
+    finishedAt: s.finished_at,
+    segmentTag: s.segment_tag || null,
+    segmentTagLabel: s.segment_tag ? SEGMENT_TAGS[s.segment_tag]?.label || null : null,
+    granularity: s.granularity || DEFAULT_GRANULARITY,
+  };
+}
+
+/**
+ * 刷新会话活跃时间（推进 / 决策 / 下单都会调用）。
+ * 「上次停在第 N 根」要准，靠的就是这个时间戳而不是 created_at。
+ */
+async function touchSession(sessionId) {
+  await pool.query('UPDATE blind_sessions SET last_active_at=now() WHERE id=$1', [sessionId]);
 }
 
 /* ------------------------------------------------------------------ *
@@ -563,6 +736,7 @@ export async function recordDecision({ userId, sessionId, action, reason, stopPl
      VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
     [s.id, s.cursor_seq, act, text || null, stop, isSkipped]
   );
+  await touchSession(s.id);
   logger.info('双盲决策已记录', { userId, sessionId, seq: s.cursor_seq, action: act, skipped: isSkipped });
   return { id: ins[0].id, skipped: isSkipped };
 }
@@ -701,6 +875,7 @@ export async function tradeInBlind({ userId, sessionId, side, quantity }) {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
     [s.id, s.cursor_seq, s.stock_code, s.stock_name, sd, q, p, round2(p * q), exec ? exec.fee : 0, exec ? exec.realizedPnl : 0]
   );
+  await touchSession(s.id);
   return getBlindSession(userId, s.id);
 }
 

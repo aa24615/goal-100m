@@ -13,6 +13,7 @@ import { Card, Progress, Statistic, Tag, Typography, Alert, Space, Tooltip, Tabl
 import { InfoCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { CheckupPayload, BreakdownGroup, MetricHint } from '../types';
 import { formatMoney, formatNum } from '../utils';
+import { RATIO_GUARD_THRESHOLD } from '../constants';
 
 const { Text, Paragraph, Title } = Typography;
 
@@ -104,6 +105,9 @@ export default function CheckupPanel({ data, loading, onStartTraining, onStartPr
     return showMilestone && !milestoneDismissed(key) ? data.milestone : null;
   }, [data, showMilestone]);
 
+  // RQ-95 小样本护栏：以后端 ratioGate 为准，缺失时按本地阈值兜底（前后端同源）
+  const showRatios = data?.ratioGate ? data.ratioGate.showRatios : sampleSize >= RATIO_GUARD_THRESHOLD;
+
   // 进度条口径优先用后端 progress（已按「当前档→下一档」区间计算），
   // 缺失时退回旧算法，保证向后兼容
   const percent = progress
@@ -163,6 +167,29 @@ export default function CheckupPanel({ data, loading, onStartTraining, onStartPr
                 </div>
               </div>
             </div>
+          )}
+
+          {/* RQ-97 误差带：把统计不确定性直接写进界面（本次检索中唯一确认的全行业空白） */}
+          {data.errorBand && (
+            <div data-testid="checkup-error-band" style={{ marginBottom: 12, fontSize: 12 }}>
+              <Text type="secondary">期望值误差带：</Text>
+              <div>{data.errorBand.text}</div>
+              <div style={{ marginTop: 2 }}>{data.errorBand.cannot}</div>
+            </div>
+          )}
+
+          {/* RQ-95 小样本护栏：N < 30 不展示任何比率类结论 */}
+          {!showRatios && (
+            <Alert
+              type="info"
+              showIcon={false}
+              style={{ marginBottom: 12, fontSize: 12 }}
+              data-testid="checkup-ratio-gate"
+              message={
+                data.ratioGate?.reason ||
+                `样本 ${sampleSize} 笔未达 ${RATIO_GUARD_THRESHOLD} 笔护栏，胜率 / 期望值（R）/ 平均 R 与排名暂不展示。`
+              }
+            />
           )}
 
           {/* RQ-80 距下一档的进度条 */}
@@ -277,39 +304,44 @@ export default function CheckupPanel({ data, loading, onStartTraining, onStartPr
                 valueStyle={{ color: data.expectancy.amount >= 0 ? '#e0584f' : '#2fa06a' }}
               />
             </div>
-            <div data-testid="metric-expectancy-r">
-              <Statistic
-                title={
-                  <span>
-                    期望值（R）<HintSuffix hint={data.expectancyR.hint} />
-                  </span>
-                }
-                value={data.expectancyR.value == null ? '—' : data.expectancyR.value}
-                precision={data.expectancyR.value == null ? 0 : 2}
-              />
-            </div>
-            <div data-testid="metric-r-multiple">
-              <Statistic
-                title={
-                  <span>
-                    平均 R 倍数<HintSuffix hint={data.rMultiple.hint} />
-                  </span>
-                }
-                value={data.rMultiple.avgR == null ? '—' : data.rMultiple.avgR}
-                precision={data.rMultiple.avgR == null ? 0 : 2}
-              />
-            </div>
-            <div data-testid="metric-hold-ratio">
-              <Statistic
-                title={
-                  <span>
-                    亏损/盈利持仓天数比<HintSuffix hint={data.holdTime.hint} />
-                  </span>
-                }
-                value={data.holdTime.ratio == null ? '—' : data.holdTime.ratio}
-                precision={data.holdTime.ratio == null ? 0 : 2}
-              />
-            </div>
+            {/* RQ-95：以下三项是**比率类**指标，样本未过护栏时整块不渲染 */}
+            {showRatios && (
+              <div data-testid="ratio-metrics" style={{ display: 'contents' }}>
+                <div data-testid="metric-expectancy-r">
+                  <Statistic
+                    title={
+                      <span>
+                        期望值（R）<HintSuffix hint={data.expectancyR.hint} />
+                      </span>
+                    }
+                    value={data.expectancyR.value == null ? '—' : data.expectancyR.value}
+                    precision={data.expectancyR.value == null ? 0 : 2}
+                  />
+                </div>
+                <div data-testid="metric-r-multiple">
+                  <Statistic
+                    title={
+                      <span>
+                        平均 R 倍数<HintSuffix hint={data.rMultiple.hint} />
+                      </span>
+                    }
+                    value={data.rMultiple.avgR == null ? '—' : data.rMultiple.avgR}
+                    precision={data.rMultiple.avgR == null ? 0 : 2}
+                  />
+                </div>
+                <div data-testid="metric-hold-ratio">
+                  <Statistic
+                    title={
+                      <span>
+                        亏损/盈利持仓天数比<HintSuffix hint={data.holdTime.hint} />
+                      </span>
+                    }
+                    value={data.holdTime.ratio == null ? '—' : data.holdTime.ratio}
+                    precision={data.holdTime.ratio == null ? 0 : 2}
+                  />
+                </div>
+              </div>
+            )}
             <div data-testid="metric-discipline">
               <Statistic
                 title={

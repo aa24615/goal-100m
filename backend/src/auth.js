@@ -5,6 +5,8 @@ import { randomBytes, createHash } from 'node:crypto';
 import pool from './db.js';
 import { logger } from './logger.js';
 import { asyncHandler } from './middleware.js';
+import { track } from './services/analyticsService.js';
+import { normalizeChannel } from './services/northStarService.js';
 
 const router = express.Router();
 const INITIAL_CAPITAL = 1000000; // 初始虚拟资金 ¥1,000,000
@@ -149,9 +151,11 @@ export function validateRegister(username, email, password) {
 router.post(
   '/register',
   asyncHandler(async (req, res) => {
-    const { username, email, password } = req.body || {};
+    const { username, email, password, channel } = req.body || {};
     const u = norm(username);
     const em = norm(email);
+    // RQ-105 获客归因：渠道在注册时就落到用户行，跨会话归因才不会随埋点顺序漂移
+    const chan = normalizeChannel(channel);
     if (!u || !em || !password) {
       logger.warn('注册失败: 参数缺失', { username: u, email: em, ip: req.ip });
       return res.status(400).json({ error: '用户名、邮箱、密码均为必填' });
@@ -164,12 +168,16 @@ router.post(
     const hash = await bcrypt.hash(password, 10);
     try {
       const { rows } = await pool.query(
-        'INSERT INTO users (username, email, password_hash, cash, initial_capital) VALUES ($1, $2, $3, $4, $4) RETURNING id, username, email, cash, initial_capital',
-        [u, em, hash, INITIAL_CAPITAL]
+        `INSERT INTO users (username, email, password_hash, cash, initial_capital, acquisition_channel)
+         VALUES ($1, $2, $3, $4, $4, $5)
+         RETURNING id, username, email, cash, initial_capital, acquisition_channel`,
+        [u, em, hash, INITIAL_CAPITAL, chan]
       );
       const user = rows[0];
       const token = signToken(user.id);
-      logger.info('注册成功', { userId: user.id, username: u, email: em, ip: req.ip });
+      // 埋点只带渠道，不含任何身份信息（硬约束 5）
+      await track(user.id, 'signup', { channel: chan }).catch(() => {});
+      logger.info('注册成功', { userId: user.id, username: u, email: em, channel: chan, ip: req.ip });
       res.json({ token, user: userPayload(user) });
     } catch (e) {
       if (e.code === '23505') {

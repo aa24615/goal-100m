@@ -60,6 +60,16 @@ vi.mock('../api', () => ({
   stepBlind: vi.fn(() => Promise.resolve({ data: { view: VIEW, bars: BARS } })),
   submitDecision: vi.fn(() => Promise.resolve({ data: { id: 1, skipped: false } })),
   tradeBlind: vi.fn(() => Promise.resolve({ data: { ok: true, view: VIEW, bars: BARS } })),
+  // RQ-91：页面挂载后会先查一次断点续做，缺省视为「没有可续做的训练」
+  resumeBlind: vi.fn(() =>
+    Promise.resolve({ data: { resumable: false, hint: { resumable: false, text: '' }, session: null, view: null, bars: null } })
+  ),
+  abandonBlind: vi.fn(() => Promise.resolve({ data: { ok: true, id: 7 } })),
+  getScoreCard: vi.fn(() =>
+    Promise.resolve({
+      data: { title: '训练成绩卡', subtitle: '已揭示标的身份', lines: ['收益率：+3.20%'], text: '【训练成绩卡】', copyable: true, disclaimer: '不构成投资建议，不承诺任何收益。', tier: { key: 'behavior', label: '行为级', remaining: 40, nextLabel: '绩效级' } },
+    })
+  ),
   finishBlind: vi.fn(() =>
     Promise.resolve({
       data: {

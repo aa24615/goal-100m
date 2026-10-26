@@ -1,29 +1,70 @@
 // 全局共享常量：把散落在各页面的“魔法字符串/数组”集中管理，便于统一维护与测试。
 
-// 默认首页（行情中心）
-export const HOME = '/market';
+/* ------------------------------------------------------------------ *
+ * RQ-93 门面与定位：默认首页由「行情中心」改为「训练中心」             *
+ * ------------------------------------------------------------------ *
+ * v8 复核：内核早已是训练工具（双盲 + 体检单 + 真实规则），
+ * 首屏却仍写着「A 股模拟交易大厅」，导航前 5 项全是行情/持仓/委托（F-15）。
+ * 新用户按「模拟炒股」的预期进来，正面撞上同花顺 / 叩富的主场，
+ * 而真正会留下来的「想练纪律的人」根本不知道这里有训练。
+ * 因此：首访落点 = 训练，训练类入口前置，交易类收为「账户」。
+ * ------------------------------------------------------------------ */
+
+// 默认首页（训练中心）
+export const HOME = '/training';
 
 // 标签栏持久化键
 export const TABS_STORAGE_KEY = 'qc_tabs';
 
+/** 对外品牌口径：不再自称「模拟交易大厅」 */
+export const BRAND = {
+  name: '赚一个小目标',
+  sub: '训练场',
+  header: 'A 股训练场 · 练执行纪律',
+  /** 自证测试的黑名单：这些旧门面文案一旦重现立即失败（防止悄悄漂回去） */
+  forbidden: ['A 股模拟交易大厅', '模拟交易大厅'],
+} as const;
+
 // 左侧导航顺序（同时用于“当前路由命中哪个菜单”的判断）
+// 注意：这里保持为**全量注册表**（含折叠项），渲染口径见 NAV_GROUPS。
 export const NAV_ORDER = [
-  '/market',
-  '/watchlist',
+  '/training',
+  '/blind',
+  '/review',
   '/portfolio',
   '/orders',
   '/transactions',
+  '/market',
+  '/watchlist',
   '/replay',
-  '/blind',
-  '/review',
   '/scenarios',
   '/rooms',
   '/leaderboard',
   '/profile',
 ] as const;
 
+/**
+ * RQ-93 / RQ-100 实际渲染的一级导航（分组）。
+ * 硬约束：训练类入口在前两位；交易类收进「账户」；零使用功能不出现在一级导航。
+ * 一级项 4 个（≤7），房间赛与剧本训练场已折叠出去。
+ */
+export const NAV_GROUPS: { key: string; title: string; items: string[] }[] = [
+  { key: 'g-train', title: '训练', items: ['/training', '/blind', '/review'] },
+  { key: 'g-account', title: '账户', items: ['/portfolio', '/orders', '/transactions'] },
+  { key: 'g-market', title: '行情', items: ['/market', '/watchlist'] },
+  { key: 'g-more', title: '更多', items: ['/replay', '/leaderboard', '/profile'] },
+];
+
+/**
+ * RQ-100 零使用功能：房间赛 0 使用、剧本训练场 1 次（F-23）。
+ * 它们**不进入任何一级分组**，但路由与 MENU_LABEL 保留，
+ * 已收藏书签或直接输入地址的用户仍可访问——降噪不等于把功能删掉。
+ */
+export const LOW_USAGE_NAV = ['/scenarios', '/rooms'] as const;
+
 // 路由 -> 中文标题（菜单、标签栏、面包屑共用）
 export const MENU_LABEL: Record<string, string> = {
+  '/training': '训练中心',
   '/market': '行情中心',
   '/watchlist': '自选股',
   '/portfolio': '我的持仓',
@@ -37,6 +78,31 @@ export const MENU_LABEL: Record<string, string> = {
   '/leaderboard': '收益排行榜',
   '/profile': '个人资料',
 };
+
+/* ------------------------------------------------------------------ *
+ * RQ-92 首训直达（本期北极星的入场闸口）                              *
+ * ------------------------------------------------------------------ *
+ * 当前基线：开始 4 次 → 决策 0 次。用户卡在「不知道下一步做什么」。
+ * 首训的目标不是教会规则，而是**让第一次判断真的发生**：
+ * ≤3 次点击、≤60 秒、不需要先有持仓 / 先有样本 / 先懂规则。
+ * ------------------------------------------------------------------ */
+export const FIRST_TRAINING = {
+  goalSeconds: 60,
+  maxClicks: 3,
+  title: '做一次训练',
+  subtitle: '系统给你一段真实历史行情，你只需要做一个选择',
+  cta: '开始第一次训练',
+  decisionCta: '提交第一次判断',
+  steps: [
+    '点「开始第一次训练」，系统随机抽一段真实 A 股历史行情（看不到代码与日期）',
+    '看走势，选一个方向：买 / 卖 / 观望',
+    '一句话说明为什么，第一次训练就完成了',
+  ],
+  note: '不需要先有持仓，也不需要先积累样本。第一次判断只要几十秒。',
+} as const;
+
+/** RQ-91 断点续做提示口径（与后端 buildResumeHint 同源） */
+export const RESUME_HINT_PREFIX = '上次停在第';
 
 /* ------------------------------------------------------------------ *
  * RQ-51 / RQ-72 口径统一管理                                          *
@@ -59,6 +125,13 @@ export const DATA_SOURCE_STATEMENT =
  * 前端只用于展示进度，判定一律以后端为准，避免两边各设一个数。
  */
 export const SAMPLE_THRESHOLD = 50;
+
+/**
+ * RQ-95 小样本护栏：样本 < 30 笔时**不展示任何比率类结论**（胜率 / 期望值 R / 平均 R / 持仓比），
+ * 也不参与排名展示。且与后端 checkupService.RATIO_GUARD_THRESHOLD 同源 —— 前端只做展示判断，
+ * 真正判定一律以后端 ratioGate 为准，避免两边各设一个数。
+ */
+export const RATIO_GUARD_THRESHOLD = 30;
 
 /** 禁止再出现的旧口径文案——RQ-72 自证测试的黑名单，一旦漂移立即失败 */
 export const FORBIDDEN_WORDINGS = [

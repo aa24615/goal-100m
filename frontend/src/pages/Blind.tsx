@@ -6,8 +6,8 @@
  * 也不使用任何带 code 的字段——包括持仓与成交列表（后端已按 alias 覆盖）。
  */
 
-import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Card,
   Button,
@@ -33,11 +33,25 @@ import {
   submitDecision,
   tradeBlind,
   finishBlind,
+  resumeBlind,
+  abandonBlind,
+  getScoreCard,
 } from '../api';
 import { Select } from 'antd';
-import type { BlindSession, BlindView, BlindScore, MaskedBar, BlindDecision, SegmentTag, Granularity } from '../types';
+import type {
+  BlindSession,
+  BlindView,
+  BlindScore,
+  MaskedBar,
+  BlindDecision,
+  SegmentTag,
+  Granularity,
+  ResumeHint,
+  ScoreCardPayload,
+} from '../types';
 import { track } from '../utils/monitor';
 import Disclaimer from '../components/Disclaimer';
+import ScoreCard from '../components/ScoreCard';
 import { formatMoney, formatNum, formatPct } from '../utils';
 import { useIsMobile } from '../hooks/useIsMobile';
 import api from '../api';
@@ -47,6 +61,7 @@ const DECISION_INTERVAL = 10;
 
 export default function Blind() {
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const { message, modal } = AntApp.useApp();
   // RQ-84 手机端：竖屏 / 单手 / 大按钮 / 不横向滚动
   const isMobile = useIsMobile();
@@ -65,6 +80,13 @@ export default function Blind() {
     action: 'HOLD',
     reason: '',
   });
+
+  // RQ-91 断点提示；RQ-92 首训引导；RQ-99 成绩卡
+  const [resumeHint, setResumeHint] = useState<ResumeHint | null>(null);
+  const [card, setCard] = useState<ScoreCardPayload | null>(null);
+  const sessionParam = Number(params.get('session') || 0);
+  const firstParam = params.get('first') === '1';
+  const abandonParam = Number(params.get('abandon') || 0);
 
   // RQ-82 拉取服务端字典而不是把四类标签硬编码在前端，避免前后端口径漂移
   useEffect(() => {
@@ -86,6 +108,41 @@ export default function Blind() {
     setView(r.data.view);
     setBars(r.data.bars);
   };
+
+  /**
+   * RQ-91 进入页面时的恢复顺序：
+   *   ?abandon=ID → 放弃这段；
+   *   ?session=ID → 恢复指定会话（首训引导从训练中心跳转过来时带 first=1）；
+   *   都没有      → 查一次断点续做，有就给「上次停在第 N 根」并直接接着练。
+   * 这样「关掉页面再回来」不需要用户做任何额外操作。
+   */
+  useEffect(() => {
+    const boot = async () => {
+      try {
+        if (abandonParam) {
+          await abandonBlind(abandonParam);
+          setResumeHint(null);
+          setParams({}, { replace: true });
+          return;
+        }
+        if (sessionParam) {
+          await load(sessionParam);
+          if (firstParam) track('first_training_start', { sessionId: sessionParam });
+          return;
+        }
+        const r = await resumeBlind();
+        setResumeHint(r.data.hint?.text ? r.data.hint : r.data.resumable ? r.data.hint : null);
+        if (r.data.resumable && r.data.session) {
+          await load(r.data.session.id);
+          track('blind_resume', { sessionId: r.data.session.id });
+        }
+      } catch {
+        /* 续做查询失败不应阻断手动开训 */
+      }
+    };
+    boot();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionParam, abandonParam, firstParam]);
 
   const start = async () => {
     setBusy(true);
@@ -156,6 +213,7 @@ export default function Blind() {
         skipped,
       });
       track('blind_decision', { skipped });
+      if (firstParam) track('first_training_decision', { skipped });
       setDecisionOpen(false);
       setDecision({ action: 'HOLD', reason: '' });
       await load(session.id);
@@ -171,6 +229,13 @@ export default function Blind() {
       setScore(r.data.score);
       setSession(r.data.session);
       setView(r.data.view);
+      // RQ-99 成绩卡：数字与体检单同源，可复制带走
+      try {
+        const c = await getScoreCard(session.id);
+        setCard(c.data);
+      } catch {
+        setCard(null);
+      }
       message.success('训练结束，已揭示标的身份');
     } catch (e: any) {
       message.error(e?.response?.data?.error || '生成成绩失败');
@@ -179,6 +244,8 @@ export default function Blind() {
 
   const visible = bars.filter((b) => b.i <= (view?.cursorIndex ?? 0));
   const last = visible[visible.length - 1];
+  // RQ-92 首训引导：只在「首次进入且还没做过任何决策」时出现，做完第一次就消失
+  const guided = firstParam && (view?.decisions?.length ?? 0) === 0;
 
   return (
     <div className={isMobile ? 'blind-mobile' : undefined}>
@@ -232,8 +299,66 @@ export default function Blind() {
           />
         )}
 
+        {/* RQ-91 断点提示：明确告知「上次停在第 N 根」，而不是让进度静默消失 */}
+        {resumeHint?.resumable && resumeHint.text && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            data-testid="blind-resume-hint"
+            message={resumeHint.text}
+            description={
+              <Space wrap>
+                <a data-testid="blind-resume-abandon" onClick={() => setParams({ abandon: String(resumeHint.sessionId || '') })}>
+                  放弃这段
+                </a>
+              </Space>
+            }
+          />
+        )}
+
         {session && view && (
           <>
+            {/* RQ-92 引导式第一次决策：系统给局面，用户只做一个选择（≤3 次点击） */}
+            {guided && (
+              <Card
+                size="small"
+                style={{ marginBottom: 12 }}
+                data-testid="guided-decision"
+                title="第一次判断：看走势，选一个方向"
+              >
+                <Space wrap>
+                  {(['BUY', 'SELL', 'HOLD'] as const).map((a) => (
+                    <Button
+                      key={a}
+                      size={isMobile ? 'large' : 'middle'}
+                      type={decision.action === a ? 'primary' : 'default'}
+                      data-testid={`guided-${a.toLowerCase()}`}
+                      onClick={() => setDecision((d) => ({ ...d, action: a }))}
+                    >
+                      {a === 'BUY' ? '买' : a === 'SELL' ? '卖' : '观望'}
+                    </Button>
+                  ))}
+                </Space>
+                <Input.TextArea
+                  rows={2}
+                  style={{ marginTop: 8 }}
+                  placeholder="为什么？（可留空，留空会被记为「未记录」并计入纪律执行率）"
+                  value={decision.reason}
+                  onChange={(e) => setDecision((d) => ({ ...d, reason: e.target.value }))}
+                />
+                <Button
+                  type="primary"
+                  block={isMobile}
+                  style={{ marginTop: 8 }}
+                  data-testid="guided-submit"
+                  onClick={() => doDecision(false)}
+                >
+                  提交第一次判断
+                </Button>
+              </Card>
+            )}
+
             <Space wrap style={{ marginBottom: 12 }}>
               <Tag icon={<EyeInvisibleOutlined />} color="blue" data-testid="blind-alias">
                 {view.alias}（身份已隐藏）
@@ -401,6 +526,10 @@ export default function Blind() {
             <Paragraph type="secondary" style={{ fontSize: 12 }}>
               纪律执行率 = 已写理由或计划止损的决策点 ÷ 全部决策点。{score.disclaimer}
             </Paragraph>
+            {/* RQ-99 成绩卡：可复制带走的单次结论 */}
+            <div style={{ marginTop: 12 }}>
+              <ScoreCard data={card} isMobile={isMobile} />
+            </div>
           </>
         )}
       </Card>

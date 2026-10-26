@@ -29,6 +29,7 @@ import {
   EyeInvisibleOutlined,
   ReloadOutlined,
   FieldTimeOutlined,
+  ThunderboltOutlined,
   MenuOutlined,
   BookOutlined,
   ExperimentOutlined,
@@ -38,6 +39,7 @@ import {
 import { useAuth } from './auth';
 import api, { getResetNotice, resetAccount, getPreferences, savePreferences, updateGuide } from './api';
 import Login from './pages/Login';
+import Training from './pages/Training';
 import Market from './pages/Market';
 import Watchlist from './pages/Watchlist';
 import StockDetail from './pages/StockDetail';
@@ -57,7 +59,7 @@ import UserAvatar from './components/UserAvatar';
 import TabBar from './components/TabBar';
 import GuideOverlay from './components/GuideOverlay';
 import MarketStatusBar, { ThemeControls } from './components/MarketStatusBar';
-import { HOME, TABS_STORAGE_KEY, NAV_ORDER, MENU_LABEL } from './constants';
+import { HOME, TABS_STORAGE_KEY, NAV_ORDER, NAV_GROUPS, MENU_LABEL, BRAND } from './constants';
 import type { MarketStatus, Preferences } from './types';
 
 const { Sider, Header, Content } = Layout;
@@ -65,6 +67,7 @@ const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
 const NAV_ICONS: Record<string, React.ReactNode> = {
+  '/training': <ThunderboltOutlined />,
   '/market': <LineChartOutlined />,
   '/watchlist': <StarOutlined />,
   '/portfolio': <WalletOutlined />,
@@ -79,7 +82,22 @@ const NAV_ICONS: Record<string, React.ReactNode> = {
   '/profile': <UserOutlined />,
 };
 
-const menuItems = NAV_ORDER.map((key) => ({ key, icon: NAV_ICONS[key], label: MENU_LABEL[key] }));
+/**
+ * RQ-93 / RQ-100 菜单结构：按分组渲染，训练组置顶，交易类收为「账户」。
+ * 零使用功能（房间赛 / 剧本训练场）不出现在任何分组里（LOW_USAGE_NAV）。
+ */
+const menuItems = NAV_GROUPS.map((g) => ({
+  key: g.key,
+  icon: NAV_ICONS[g.key] || NAV_ICONS[g.items[0]],
+  label: g.title,
+  children: g.items.map((k) => ({ key: k, icon: NAV_ICONS[k], label: MENU_LABEL[k] })),
+}));
+
+/** 命中子项时自动展开所属分组 */
+const SUBMENU_OF: Record<string, string> = NAV_GROUPS.reduce((acc, g) => {
+  for (const k of g.items) acc[k] = g.key;
+  return acc;
+}, {} as Record<string, string>);
 
 interface TabItem {
   key: string;
@@ -252,7 +270,7 @@ function Shell() {
     navigate(HOME);
   };
 
-  const selectedKey = NAV_ORDER.find((k) => pathname.startsWith(k)) || '/market';
+  const selectedKey = NAV_ORDER.find((k) => pathname.startsWith(k)) || HOME;
 
   const openReset = async () => {
     try {
@@ -283,6 +301,7 @@ function Shell() {
       theme={prefs.theme === 'dark' ? 'dark' : 'light'}
       mode="inline"
       selectedKeys={[selectedKey]}
+      defaultOpenKeys={[SUBMENU_OF[selectedKey]].filter(Boolean)}
       items={menuItems}
       onClick={(e) => {
         navigate(e.key);
@@ -303,8 +322,8 @@ function Shell() {
         {!isMobile && (
           <Sider theme={prefs.theme === 'dark' ? 'dark' : 'light'} width={200} breakpoint="lg" collapsedWidth={0}>
             <div className="logo">
-              <span className="logo-main">赚一个小目标</span>
-              <span className="logo-sub">模拟股票</span>
+              <span className="logo-main">{BRAND.name}</span>
+              <span className="logo-sub">{BRAND.sub}</span>
             </div>
             {nav}
           </Sider>
@@ -326,7 +345,12 @@ function Shell() {
           >
             <Space size="small" wrap>
               {isMobile && <Button type="text" icon={<MenuOutlined />} onClick={() => setDrawerOpen(true)} />}
-              {!isMobile && <Text strong style={{ fontSize: 16 }}>A 股模拟交易大厅</Text>}
+              {/* RQ-93：首屏不再自称「模拟交易大厅」——那会把新用户带进同花顺/叩富的正面战场 */}
+              {!isMobile && (
+                <Text strong style={{ fontSize: 16 }} data-testid="brand-header">
+                  {BRAND.header}
+                </Text>
+              )}
               {status && <MarketStatusBar status={status} />}
             </Space>
             <Space size="large" wrap>
@@ -392,6 +416,7 @@ function Shell() {
           <Content style={{ margin: isMobile ? 8 : 16, padding: 0 }}>
             <div className="page-card">
               <Routes>
+                <Route path="/training" element={<Training />} />
                 <Route path="/market" element={<Market />} />
                 <Route path="/watchlist" element={<Watchlist />} />
                 <Route path="/stock/:code" element={<StockDetail />} />

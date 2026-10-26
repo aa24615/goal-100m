@@ -30,6 +30,13 @@ import type {
   TrainingPrescription,
   SegmentTag,
   Granularity,
+  BlindResume,
+  ScoreCardPayload,
+  FunnelPayload,
+  NorthStarPayload,
+  AcquisitionPayload,
+  InboxPayload,
+  RuleParityPayload,
 } from './types';
 
 const api = axios.create({ baseURL: '/api' });
@@ -196,6 +203,34 @@ export const tradeBlind = (id: number, side: 'BUY' | 'SELL', quantity: number) =
 export const finishBlind = (id: number) =>
   api.post<{ session: BlindSession; score: BlindScore; view: BlindView }>(`/blind/${id}/finish`);
 export const listBlind = (limit = 20) => api.get<BlindSession[]>('/blind/history', { params: { limit } });
+
+/* ---------------- RQ-91 断点续做 ---------------- */
+export const resumeBlind = () => api.get<BlindResume>('/blind/resume');
+export const abandonBlind = (id: number) => api.post<{ ok: boolean; id: number }>(`/blind/${id}/abandon`);
+/** RQ-101 参数字典唯一源 */
+export const getBlindDict = () =>
+  api.get<{
+    tags: SegmentTag[];
+    tagKeys: string[];
+    aliases: Record<string, string>;
+    granularities: Granularity[];
+    defaultGranularity: string;
+    decisionInterval: number;
+  }>('/blind/dict');
+
+/* ---------------- RQ-99 训练成绩卡 ---------------- */
+export const getScoreCard = (id: number) => api.get<ScoreCardPayload>(`/blind/${id}/card`);
+
+/* ---------------- RQ-102 训练与真实规则账户同源 ---------------- */
+export const getRuleParity = (id: number) => api.get<RuleParityPayload>(`/blind/${id}/parity`);
+
+/* ---------------- RQ-94 / RQ-96 / RQ-98 / RQ-105 / RQ-104 ---------------- */
+export const getFunnel = (params?: { days?: number }) => api.get<FunnelPayload>('/analytics/funnel', { params });
+export const getNorthStar = () => api.get<NorthStarPayload>('/analytics/north-star');
+export const getAcquisition = (params?: { days?: number }) =>
+  api.get<AcquisitionPayload>('/analytics/acquisition', { params });
+export const getNotifications = (dismissed: string[] = []) =>
+  api.get<InboxPayload>('/analytics/notifications', { params: { dismissed: dismissed.join(',') } });
 
 /* ---------------- RQ-76/77/78 交易体检单 ---------------- */
 export const getCheckup = (period = '30d') => api.get<CheckupPayload>('/review/checkup', { params: { period } });

@@ -548,6 +548,54 @@ export interface CheckupPayload {
   };
   /** RQ-85 0 笔冷启动引导 */
   coldStart?: CheckupColdStart;
+  /**
+   * RQ-97 可信度误差带（±1.96σ/√n）。
+   * 可选：兼容旧后端与单测里的不完整 mock，缺失时不渲染误差带而不是崩溃。
+   */
+  errorBand?: CheckupErrorBand;
+  /** RQ-95 小样本护栏：缺失时按 sampleSize >= RATIO_GUARD_THRESHOLD 本地兜底 */
+  ratioGate?: CheckupRatioGate;
+  /** RQ-95 绩效类比率；样本未过护栏时为 null（页面据此整块隐藏） */
+  ratios?: CheckupRatios | null;
+}
+
+/**
+ * RQ-97 期望值误差带。
+ * 竞品一律给满屏确定数字：60 笔就告诉你「期望值 0.31R」，
+ * 却不告诉你 95% 置信下可能是 ±0.29R —— 连正负号都换得掉。
+ */
+export interface CheckupErrorBand {
+  n: number;
+  sigma: number;
+  z: number;
+  bandR: number | null;
+  low: number | null;
+  high: number | null;
+  signUncertain: boolean;
+  text: string;
+  cannot: string;
+}
+
+/** RQ-95 小样本护栏判定结果 */
+export interface CheckupRatioGate {
+  threshold: number;
+  sampleSize: number;
+  showRatios: boolean;
+  showRanking: boolean;
+  showStrategyLanguage: boolean;
+  remaining: number;
+  action: { label: string; path: string } | null;
+  reason: string;
+}
+
+/** RQ-95 绩效类比率（未过护栏时为 null） */
+export interface CheckupRatios {
+  winRate: number;
+  expectancyR: number | null;
+  avgR: number | null;
+  holdRatio: number | null;
+  bandR: number | null;
+  signUncertain: boolean;
 }
 
 /** RQ-79 可信度档位 */
@@ -707,4 +755,187 @@ export interface BlindScore {
   realizedTotal: number;
   feeTotal: number;
   disclaimer: string;
+}
+
+/* ---------------- RQ-91 断点续做 ---------------- */
+
+/** 「上次停在第 N 根」提示 */
+export interface ResumeHint {
+  resumable: boolean;
+  reason?: string;
+  sessionId?: number | null;
+  alias?: string | null;
+  status?: string;
+  cursorIndex?: number;
+  totalBars?: number;
+  percent?: number;
+  text: string;
+  updatedAt?: string | null;
+  actions?: {
+    resume: { label: string; path: string };
+    abandon: { label: string; path: string };
+  };
+}
+
+export interface BlindResume {
+  resumable: boolean;
+  hint: ResumeHint;
+  session: BlindSession | null;
+  view: BlindView | null;
+  bars: MaskedBar[] | null;
+}
+
+/* ---------------- RQ-99 训练成绩卡 ---------------- */
+
+export interface ScoreCardPayload {
+  title: string;
+  subtitle: string;
+  lines: string[];
+  text: string;
+  copyable: boolean;
+  disclaimer: string;
+  tier: { key: string; label: string; remaining: number; nextLabel: string | null };
+}
+
+/* ---------------- RQ-96 训练漏斗 ---------------- */
+
+export interface FunnelStep {
+  key: string;
+  label: string;
+  event?: string;
+  count?: number;
+}
+
+export interface FunnelSessionRow {
+  sessionId: number | null;
+  userId: number | null;
+  reached: string;
+  reachedLabel: string;
+  breakpoint: string | null;
+  breakpointLabel: string | null;
+  decisions: number;
+  secToFirstDecision: number | null;
+  secTotal: number | null;
+  withinFirstDecisionBudget: boolean | null;
+}
+
+export interface FunnelPayload {
+  days: number;
+  steps: FunnelStep[];
+  conversion: {
+    total: number;
+    startToFirstDecision: number | null;
+    firstToFinish: number | null;
+    startToFinish: number | null;
+  };
+  timing: {
+    medianSecToFirstDecision: number | null;
+    medianSecToFinish: number | null;
+    budgetSec: number;
+    withinBudgetCount: number;
+  };
+  breakpoints: { key: string; label: string; stuck: number }[];
+  sessions: FunnelSessionRow[];
+  note: string;
+}
+
+/* ---------------- RQ-98 北极星 ---------------- */
+
+export interface NorthStarPayload {
+  current: {
+    metric: string;
+    target: string;
+    value: number | null;
+    numerator: number;
+    denominator: number;
+    readable: boolean;
+    note: string;
+  };
+  formal: {
+    metric: string;
+    enabled: boolean;
+    value: number | null;
+    sampleSize: number;
+    minSample: number;
+    earliestReadableDate: string | null;
+    referenceToday: string | null;
+    reason: string;
+  };
+  disclaimer: string;
+}
+
+/* ---------------- RQ-105 获客实验 ---------------- */
+
+export interface AcquisitionPayload {
+  days: number;
+  channels: {
+    channel: string;
+    registered: number;
+    firstDecision: number;
+    finished: number;
+    firstTrainingRate: number | null;
+    medianSecToFirstDecision: number | null;
+  }[];
+  total: { registered: number; firstDecision: number; firstTrainingRate: number | null };
+  target: { registered: number; withinDays: number };
+  note: string;
+}
+
+/* ---------------- RQ-104 站内提示 ---------------- */
+
+export interface InboxItem {
+  key: string;
+  kind: 'milestone' | 'weekly';
+  title: string;
+  body: string;
+  cannot: string;
+  once: boolean;
+  dismissible: boolean;
+  createdAt: string;
+  action?: { label: string; path: string };
+}
+
+export interface InboxPayload {
+  items: InboxItem[];
+  count: number;
+  dismissed: string[];
+  note: string;
+}
+
+/* ---------------- RQ-102 训练与真实规则账户同源 ---------------- */
+
+export interface RuleManifestItem {
+  key: string;
+  label: string;
+  desc: string;
+  source: string;
+}
+
+export interface RuleParityPayload {
+  manifest: RuleManifestItem[];
+  parity: {
+    consistent: boolean;
+    manifest: string[];
+    trainingRules: string[];
+    accountRules: string[];
+    missingInAccount: string[];
+    missingInTraining: string[];
+    summary: string;
+  };
+  plan: {
+    sessionId: number | null;
+    eligible: boolean;
+    blockedReason: string | null;
+    orders: {
+      seq: number | null;
+      code: string | null;
+      name: string | null;
+      side: string | null;
+      quantity: number;
+      repricedAtMarket: boolean;
+      appliedRules: string[];
+      note: string;
+    }[];
+    rules: string[];
+  };
 }

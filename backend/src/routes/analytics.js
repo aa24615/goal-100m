@@ -16,6 +16,11 @@ import {
   DASHBOARD_RETENTION_WINDOW,
 } from '../services/analyticsService.js';
 import { weeklyReport } from '../services/weeklyReportService.js';
+import { trainingFunnel } from '../services/trainingFunnelService.js';
+import { northStar, acquisition } from '../services/northStarService.js';
+import { buildInbox } from '../services/notificationService.js';
+import { buildReview } from '../services/reviewService.js';
+import { getSnapshot } from '../market.js';
 import { optionalAuth } from '../auth.js';
 
 const router = express.Router();
@@ -42,6 +47,14 @@ router.get('/analytics/events', (req, res) => {
       checkup_view: '查看交易体检单',
       weekly_report_view: '查看每周训练周报',
       prescription_start: '从体检单最坏习惯一键生成并开始定向训练',
+      blind_resume: 'RQ-91 从断点继续一次未完成的训练',
+      blind_abandon: 'RQ-91 主动放弃一段未完成的训练',
+      first_training_start: 'RQ-92 首访引导首次训练开始',
+      first_training_decision: 'RQ-92 首访引导完成第一次训练决策',
+      dashboard_view: 'RQ-94 打开指标看板',
+      score_card_view: 'RQ-99 查看训练成绩卡',
+      score_card_copy: 'RQ-99 复制训练成绩卡文本',
+      signup: 'RQ-105 注册（payload.channel 记录来源渠道）',
     },
   });
 });
@@ -157,6 +170,73 @@ router.get(
         window: Number(req.query.window) || DASHBOARD_RETENTION_WINDOW,
       })
     );
+  })
+);
+
+/* ---------------------- RQ-96 训练漏斗 ---------------------- */
+
+/**
+ * 漏斗：按会话维度给出「开始 → 首次决策 → 持续决策 → 完成」的分步计数、
+ * 转化率、开始→首次决策的中位耗时，以及每一次训练分别断在第几步。
+ * 这是回答「4 次开始为什么一次决策都没有」的唯一入口。
+ */
+router.get(
+  '/analytics/funnel',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(await trainingFunnel({ days: Number(req.query.days) || 30 }));
+  })
+);
+
+/* ---------------------- RQ-98 北极星 ---------------------- */
+
+/**
+ * 北极星：当前阶段为「首训完成率」；7 日留存并列展示但标注「样本充足后启用」。
+ * N 不足时把留存数字当结论用，是本期要消除的伪结论之一（F-20）。
+ */
+router.get(
+  '/analytics/north-star',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(await northStar());
+  })
+);
+
+/* ---------------------- RQ-105 获客实验 ---------------------- */
+
+/**
+ * 获客实验：按渠道给出注册数与「首训完成率」。
+ * 本阶段刻意只测首训转化，不测留存——N 太小时留存率只是噪声。
+ */
+router.get(
+  '/analytics/acquisition',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(await acquisition({ days: Number(req.query.days) || 30 }));
+  })
+);
+
+/* ---------------------- RQ-104 站内提示 ---------------------- */
+
+/**
+ * 站内提示：达标提示 + 每周周报提示，各出现一次且可关闭。
+ * 关闭状态由前端保存并通过 ?dismissed=key,key 回传，服务端不持久化。
+ */
+router.get(
+  '/analytics/notifications',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const dismissed = String(req.query.dismissed || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const priceMap = {};
+    for (const q of getSnapshot()) priceMap[q.code] = q.price;
+    const [review, weekly] = await Promise.all([
+      buildReview(req.userId, '30d', priceMap),
+      weeklyReport(req.userId, { weekDays: 7 }),
+    ]);
+    res.json(buildInbox({ checkup: review?.checkup ?? null, weekly, dismissed }));
   })
 );
 

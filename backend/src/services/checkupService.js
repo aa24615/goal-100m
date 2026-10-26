@@ -76,6 +76,127 @@ export const SAMPLE_TIERS = [
 /** 最高档（达到后不再有下一档） */
 export const TOP_TIER = SAMPLE_TIERS[SAMPLE_TIERS.length - 1];
 
+/* ------------------------------------------------------------------ *
+ * RQ-97 可信度误差带（I-1：本次检索中唯一确认的全行业空白）           *
+ * ------------------------------------------------------------------ *
+ * 竞品一律给满屏确定数字：60 笔就告诉你「期望值 0.31R」，
+ * 却不告诉你这个数在 95% 置信度下可能是 ±0.29R——**连正负号都换得掉**。
+ *
+ * 口径（有公开依据，非自创）：
+ *   期望值 95% 置信半宽 = Z × σ / √n，Z = 1.96（95% 双侧）
+ *   行业常例：30 笔 ≈ ±0.54R、100 笔 ≈ ±0.29R（对应 σ ≈ 1.5R）
+ * 因此默认 σ 取 1.5R；当用户已有自己的 R 序列时，改用**实测标准差**，
+ * 让误差带随用户真实波动收敛而不是永远挂一个常数。
+ */
+export const BAND_Z = 1.96;
+/** 无用户实测 R 序列时的默认标准差（R 倍数口径） */
+export const DEFAULT_SIGMA_R = 1.5;
+
+/** 样本标准差（n-1）。样本 < 2 时无定义，返回 null 而不是 0 */
+export function stdDev(values = []) {
+  const arr = (Array.isArray(values) ? values : [])
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v));
+  if (arr.length < 2) return null;
+  const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
+  const variance = arr.reduce((s, v) => s + (v - mean) ** 2, 0) / (arr.length - 1);
+  return Math.sqrt(variance);
+}
+
+/**
+ * 期望值误差带（纯函数，可单测）。
+ *
+ * @param {object} o
+ * @param {number} o.sampleSize 已平仓笔数 n
+ * @param {number} [o.sigma]    R 倍数标准差；缺省用 DEFAULT_SIGMA_R
+ * @param {number|null} [o.expectancyR] 实测期望值（R），用于判断正负号是否确定
+ * @returns {object} { n, sigma, z, bandR, low, high, signUncertain, text, cannot }
+ */
+export function errorBandOf(o) {
+  const { sampleSize, sigma, expectancyR } = o && typeof o === 'object' ? o : {};
+  const n = Number.isFinite(Number(sampleSize)) ? Math.max(0, Math.floor(Number(sampleSize))) : 0;
+  const sd =
+    Number.isFinite(Number(sigma)) && Number(sigma) > 0 ? Number(sigma) : DEFAULT_SIGMA_R;
+  const z = BAND_Z;
+
+  // n = 0 时误差带无定义（除零）。返回 null 数值但保留可读文案，
+  // 避免页面渲染出 Infinity 或 NaN。
+  if (n < 1) {
+    return {
+      n: 0,
+      sigma: round2(sd),
+      z,
+      bandR: null,
+      low: null,
+      high: null,
+      signUncertain: true,
+      text: '还没有样本，无法估计误差。',
+      cannot: '不能据此判断任何策略的期望值方向。',
+    };
+  }
+
+  const raw = (z * sd) / Math.sqrt(n);
+  const bandR = pct2(raw);
+  const r = Number.isFinite(Number(expectancyR)) ? Number(expectancyR) : null;
+  // 误差半宽 ≥ |期望值| → 置信区间跨过 0，正负号都拿不准
+  const signUncertain = r == null ? true : raw >= Math.abs(r);
+
+  return {
+    n,
+    sigma: round2(sd),
+    z,
+    bandR,
+    low: r == null ? null : pct2(r - raw),
+    high: r == null ? null : pct2(r + raw),
+    signUncertain,
+    text:
+      `${n} 笔样本的期望值误差约 ±${bandR}R（95% 置信，Z=1.96，σ=${round2(sd)}R）。` +
+      (signUncertain ? '误差带跨过 0，**连正负号都不能确定**——只能看方向，不能看大小。' : '误差带未跨过 0，方向可采信，量级仍需谨慎。'),
+    cannot: signUncertain
+      ? '不能拿它判断策略是否赚钱，也不能据此调整仓位。'
+      : '不能拿它做跨市场、跨品种的外推。',
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * RQ-95 小样本护栏：N < 30 不展示任何比率类结论                       *
+ * ------------------------------------------------------------------ *
+ * 与 RQ-77/RQ-79 的分工：
+ *   - RQ-77/79 管「能不能下**结论**」（verdict / 档位）；
+ *   - RQ-95 管「能不能展示**比率**」（胜率、期望值 R、平均 R、持仓比）。
+ * 两者门槛不同是刻意的：N=2 时「胜率 50%」这种比率读起来像结论，
+ * 但统计上纯属噪声——这正是 F-19 要消除的伪结论。
+ *
+ * 纪律执行率**不在此列**：它统计的是「决策点里写了几句」，是行为计数而非绩效比率，
+ * 且 RQ-85 冷启动明确要求 0 笔用户先看到这一项。把它一并藏起来会让首训无从下手。
+ */
+export const RATIO_GUARD_THRESHOLD = 30;
+
+/**
+ * 小样本护栏（纯函数）。
+ * @param {number} n 已平仓笔数
+ */
+export function resolveRatioGate(n) {
+  const size = Number.isFinite(Number(n)) ? Math.max(0, Math.floor(Number(n))) : 0;
+  const show = size >= RATIO_GUARD_THRESHOLD;
+  const strategyTier = SAMPLE_TIERS.find((t) => t.key === 'strategy') || TOP_TIER;
+  return {
+    threshold: RATIO_GUARD_THRESHOLD,
+    sampleSize: size,
+    // 绩效类比率（胜率 / 期望值 R / 平均 R / 持仓天数比）
+    showRatios: show,
+    // 排名：N 太小时任何排名都是噪声排序
+    showRanking: show,
+    // 策略级措辞沿用 200 笔档，比 30 笔严格得多
+    showStrategyLanguage: size >= strategyTier.threshold,
+    remaining: Math.max(0, RATIO_GUARD_THRESHOLD - size),
+    action: show ? null : { label: '继续积累样本', path: '/blind' },
+    reason: show
+      ? `样本 ${size} 笔已达 ${RATIO_GUARD_THRESHOLD} 笔护栏，比率类指标可读。`
+      : `样本仅 ${size} 笔，未达 ${RATIO_GUARD_THRESHOLD} 笔护栏：胜率、期望值（R）、平均 R 与排名在统计上是噪声，暂不展示。`,
+  };
+}
+
 /**
  * 按已平仓笔数解析可信度档位与「距下一档还差几笔」（RQ-79 + RQ-80）。
  *
@@ -116,6 +237,8 @@ export function resolveTier(n) {
     progressPercent,
     // 兼容 RQ-77 的旧字段语义：是否跨过第一档门槛
     sufficient: size >= SAMPLE_THRESHOLD,
+    // RQ-97 误差带：按当前样本量给出 ±1.96σ/√n（后续由 buildCheckup 用实测 σ 覆盖）
+    band: errorBandOf({ sampleSize: size }),
   };
 }
 
@@ -519,6 +642,23 @@ export function buildCheckup(o) {
   const disc = disciplineRate(Array.isArray(decisions) ? decisions : []);
   const habit = worstHabit(closed);
 
+  // RQ-97 误差带：有实测 R 序列时用实测标准差，否则退回默认 σ（口径在 errorBandOf 内注明）
+  const measuredSigma = stdDev((rm.list || []).map((x) => x.r));
+  const band = errorBandOf({ sampleSize, sigma: measuredSigma, expectancyR: exp.r });
+  // RQ-95 小样本护栏：N < 30 一律不给比率
+  const ratioGate = resolveRatioGate(sampleSize);
+  const ratios = ratioGate.showRatios
+    ? {
+        winRate: exp.winRate,
+        expectancyR: exp.r,
+        avgR: rm.avgR,
+        holdRatio: hold.ratio,
+        // 比率的读数口径必须和误差带一起给，否则又变成「满屏确定数字」
+        bandR: band.bandR,
+        signUncertain: band.signUncertain,
+      }
+    : null;
+
   const metrics = {
     sampleSize,
     threshold: SAMPLE_THRESHOLD,
@@ -554,6 +694,11 @@ export function buildCheckup(o) {
     tierLabel: tier.label,
     canTrust: tier.canTrust,
     cannotTrust: tier.cannotTrust,
+    // ---- RQ-97 误差带 ----
+    errorBand: band,
+    // ---- RQ-95 小样本护栏 ----
+    ratioGate,
+    ratios,
     // ---- RQ-80 距下一档进度 + 达标提示 ----
     progress: {
       sampleSize,

@@ -12,12 +12,33 @@ import type { CheckupPayload, MetricHint } from '../types';
 
 const HINT: MetricHint = { label: 'x', meaning: 'm', whenToChange: 'w', formula: 'f' };
 
+/**
+ * 构造体检单。
+ * ratioGate 由 sampleSize 推导（与后端同源）：<30 笔时比率类指标整块不渲染（RQ-95），
+ * 因此**需要验证指标渲染的用例必须显式给一个 ≥30 笔的样本**。
+ */
 function mk(over: Partial<CheckupPayload> = {}): CheckupPayload {
+  const sampleSize = over.sampleSize ?? 12;
+  const sufficient = over.sufficient ?? sampleSize >= 50;
+  const remaining = over.remaining ?? Math.max(0, 50 - sampleSize);
+  const showRatios = sampleSize >= 30;
   return {
-    sampleSize: 12,
+    sampleSize,
     threshold: 50,
-    sufficient: false,
-    remaining: 38,
+    sufficient,
+    remaining,
+    ratioGate: {
+      threshold: 30,
+      sampleSize,
+      showRatios,
+      showRanking: showRatios,
+      showStrategyLanguage: sampleSize >= 200,
+      remaining: Math.max(0, 30 - sampleSize),
+      action: showRatios ? null : { label: '继续积累样本', path: '/blind' },
+      reason: showRatios
+        ? `样本 ${sampleSize} 笔已达 30 笔护栏。`
+        : `样本仅 ${sampleSize} 笔，未达 30 笔护栏：胜率 / 期望值（R）/ 平均 R 与排名暂不展示。`,
+    },
     expectancy: {
       amount: 25,
       r: 0.5,
@@ -38,11 +59,14 @@ function mk(over: Partial<CheckupPayload> = {}): CheckupPayload {
     worstHabit: null,
     verdict: null,
     gate: {
-      sufficient: false,
-      sampleSize: 12,
+      sufficient,
+      sampleSize,
       threshold: 50,
-      remaining: 38,
-      message: '已记录 12 笔，还差 38 笔可生成可信评估。',
+      remaining,
+      message:
+        sufficient
+          ? `已达到 50 笔可信样本门槛（当前 ${sampleSize} 笔）。`
+          : `已记录 ${sampleSize} 笔，还差 ${remaining} 笔可生成可信评估。`,
     },
     rawRounds: [],
     breakdown: { byHold: [], byWeekday: [], bySession: [], bySource: [] },
@@ -134,7 +158,8 @@ describe('RQ-77 样本门槛（P0）', () => {
 
 describe('RQ-76 五项决定论指标（P0）', () => {
   it('P0 · 期望值 / 期望值R / R 倍数 / 持仓比 / 纪律执行率 全部渲染', () => {
-    renderPanel(mk());
+    // 比率类指标需样本 ≥30 笔才展示（RQ-95），故这里显式给 75 笔
+    renderPanel(mk({ sampleSize: 75, sufficient: true, remaining: 0 }));
     expect(screen.getByTestId('metric-expectancy')).toBeInTheDocument();
     expect(screen.getByTestId('metric-expectancy-r')).toBeInTheDocument();
     expect(screen.getByTestId('metric-r-multiple')).toBeInTheDocument();
@@ -175,7 +200,15 @@ describe('RQ-76 五项决定论指标（P0）', () => {
   });
 
   it('P3 · 全部盈利（R 无定义）时展示「—」而不是 Infinity', () => {
-    renderPanel(mk({ expectancyR: { value: null, hint: HINT }, rMultiple: { avgR: null, count: 0, list: [], hint: HINT } }));
+    renderPanel(
+      mk({
+        sampleSize: 75,
+        sufficient: true,
+        remaining: 0,
+        expectancyR: { value: null, hint: HINT },
+        rMultiple: { avgR: null, count: 0, list: [], hint: HINT },
+      })
+    );
     expect(screen.getByTestId('metric-expectancy-r').textContent).toContain('—');
     expect(document.body.textContent).not.toContain('Infinity');
   });
@@ -214,7 +247,7 @@ describe('RQ-78 拆解与口径提示（P1）', () => {
   });
 
   it('P1 · 每项指标都带口径说明 tooltip（说明什么 / 何时该改）', () => {
-    renderPanel(mk());
+    renderPanel(mk({ sampleSize: 75, sufficient: true, remaining: 0 }));
     const panel = screen.getByTestId('checkup-panel');
     // 5 项指标各一个提示图标
     expect(panel.querySelectorAll('.anticon-info-circle').length).toBeGreaterThanOrEqual(5);

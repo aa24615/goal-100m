@@ -14,6 +14,9 @@ import {
   isGranularityAvailable,
   TAG_THRESHOLDS,
   startBlind,
+  normalizeSegmentTag,
+  resolveSegmentTag,
+  SEGMENT_TAG_ALIASES,
 } from '../../src/services/blindService.js';
 
 /* 构造收盘价序列 */
@@ -141,7 +144,7 @@ test('P3 · RQ-81 请求分钟级粒度被明确拒绝（400 业务拒绝，不�
 
 test('P3 · RQ-82 请求未知标签被明确拒绝', async () => {
   await assert.rejects(
-    () => startBlind({ userId: 1, bars: 60, tag: 'sideways' }),
+    () => startBlind({ userId: 1, bars: 60, tag: 'banana' }),
     (e) => {
       assert.equal(e.status, 400);
       assert.equal(e.business, true);
@@ -149,6 +152,46 @@ test('P3 · RQ-82 请求未知标签被明确拒绝', async () => {
       return true;
     }
   );
+});
+
+/* ===================== P3 · RQ-101 标签字典唯一源 ===================== */
+
+test('P3 · RQ-101 历史写法 sideways 被归一为 range，不再产生 400 噪声', async () => {
+  // F-25 的成因就是 sideways / range 两套写法各说各话。
+  // 归一化后：历史写法被接受并折算为规范标签，而不是每次调用吃一个 400。
+  assert.equal(normalizeSegmentTag('sideways'), 'range');
+  assert.equal(normalizeSegmentTag('SIDEWAYS'), 'range');
+  assert.equal(normalizeSegmentTag(' Range '), 'range');
+  // 真正无法识别的写法仍然返回 null，由调用方决定报错
+  assert.equal(normalizeSegmentTag('banana'), null);
+  assert.equal(normalizeSegmentTag(null), null);
+  assert.equal(normalizeSegmentTag(''), null);
+  assert.equal(normalizeSegmentTag(123), null);
+});
+
+test('P3 · RQ-101 所有别名都指向规范标签（不存在悬空映射）', () => {
+  for (const [alias, canonical] of Object.entries(SEGMENT_TAG_ALIASES)) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(SEGMENT_TAGS, canonical),
+      `别名 ${alias} 指向了不存在的规范标签 ${canonical}`
+    );
+    assert.equal(normalizeSegmentTag(alias), canonical);
+  }
+  // 规范标签自身不能被别名表覆盖
+  for (const k of Object.keys(SEGMENT_TAGS)) {
+    assert.equal(normalizeSegmentTag(k), k);
+  }
+});
+
+test('P3 · RQ-101 resolveSegmentTag 对未知标签给出可选值清单', () => {
+  const bad = resolveSegmentTag('banana');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.tag, null);
+  assert.ok(Array.isArray(bad.allowed) && bad.allowed.length > 0, '错误信息必须列出规范值');
+
+  const good = resolveSegmentTag('sideways');
+  assert.equal(good.ok, true);
+  assert.equal(good.tag, 'range');
 });
 
 /* ===================== P4 · 性能 ===================== */

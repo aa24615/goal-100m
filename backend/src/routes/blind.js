@@ -1,6 +1,7 @@
 // 双盲训练场路由（RQ-66 双盲 / RQ-67 随机来一段 / RQ-38 决策记录 / RQ-41 成绩）
 
 import express from 'express';
+import pool from '../db.js';
 import { authMiddleware } from '../auth.js';
 import { asyncHandler, parseIdParam, businessError } from '../middleware.js';
 import {
@@ -12,13 +13,20 @@ import {
   finishBlind,
   listBlindSessions,
   listBlindDecisions,
+  resumeBlind,
+  abandonBlind,
   DECISION_INTERVAL,
   SEGMENT_TAGS,
+  SEGMENT_TAG_ALIASES,
   GRANULARITIES,
   DEFAULT_GRANULARITY,
 } from '../services/blindService.js';
 import { buildPrescription } from '../services/checkupService.js';
 import { track } from '../services/analyticsService.js';
+import { buildScoreCard } from '../services/scoreCardService.js';
+import { planAccountSync, checkRuleParity, RULES_MANIFEST } from '../services/ruleParityService.js';
+import { buildReview } from '../services/reviewService.js';
+import { getSnapshot } from '../market.js';
 
 const router = express.Router();
 
@@ -125,6 +133,105 @@ router.get(
   authMiddleware,
   asyncHandler(async (req, res) => {
     res.json(await listBlindSessions(req.userId, Number(req.query.limit) || 20));
+  })
+);
+
+/**
+ * RQ-91 断点续做：返回最近一个未结束的会话 + 「上次停在第 N 根」提示。
+ * 必须放在 `/blind/:id` 之前，否则会被当成 id=resume 走 400 分支（那正是 F-25 的噪声来源之一）。
+ */
+router.get(
+  '/blind/resume',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const r = await resumeBlind(req.userId);
+    if (r.resumable) {
+      await track(req.userId, 'blind_resume', {
+        sessionId: r.session?.id ?? null,
+        cursorIndex: r.hint?.cursorIndex ?? null,
+        totalBars: r.hint?.totalBars ?? null,
+      });
+    }
+    res.json(r);
+  })
+);
+
+/**
+ * RQ-101 参数字典（唯一源）：前端一律从这里取标签与别名，
+ * 不再各自硬编码，避免 sideways / range 两套写法漂移。
+ */
+router.get('/blind/dict', authMiddleware, (req, res) => {
+  res.json({
+    tags: Object.values(SEGMENT_TAGS),
+    tagKeys: Object.keys(SEGMENT_TAGS),
+    aliases: SEGMENT_TAG_ALIASES,
+    granularities: GRANULARITIES,
+    defaultGranularity: DEFAULT_GRANULARITY,
+    decisionInterval: DECISION_INTERVAL,
+    note: '标签以 tagKeys 为唯一规范写法；aliases 中的历史写法会被服务端归一化后接受，不再返回 400。',
+  });
+});
+
+// RQ-91 放弃这段训练（与「继续」并列的两个出口）
+router.post(
+  '/blind/:id/abandon',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) throw businessError('训练 ID 无效', 400);
+    const s = await abandonBlind(req.userId, id);
+    if (!s) throw businessError('没有可放弃的进行中训练', 404);
+    await track(req.userId, 'blind_abandon', { sessionId: id });
+    res.json({ ok: true, id });
+  })
+);
+
+/**
+ * RQ-99 训练成绩卡：可复制为纯文本的单次结论。
+ * sampleSize 取自体检单（buildReview），保证「距下一档还差 N 笔」与体检单同源。
+ */
+router.get(
+  '/blind/:id/card',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) throw businessError('训练 ID 无效', 400);
+    const r = await getBlindSession(req.userId, id, { reveal: true });
+    if (!r) throw businessError('训练不存在', 404);
+    const priceMap = {};
+    for (const q of getSnapshot()) priceMap[q.code] = q.price;
+    const review = await buildReview(req.userId, '90d', priceMap);
+    const card = buildScoreCard({
+      session: r.session,
+      score: r.session.score || null,
+      sampleSize: review?.checkup?.sampleSize ?? 0,
+    });
+    await track(req.userId, 'score_card_view', { sessionId: id });
+    res.json(card);
+  })
+);
+
+/**
+ * RQ-102 训练与真实规则账户同源：先出规则校验与落单计划。
+ * 训练未结束（身份仍在遮蔽）时拒绝生成计划——否则落单动作会提前暴露标的（RQ-66）。
+ */
+router.get(
+  '/blind/:id/parity',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) throw businessError('训练 ID 无效', 400);
+    const r = await getBlindSession(req.userId, id);
+    if (!r) throw businessError('训练不存在', 404);
+    const { rows } = await pool.query(
+      'SELECT seq, stock_code, stock_name, side, quantity FROM blind_orders WHERE session_id=$1 ORDER BY seq ASC',
+      [id]
+    );
+    res.json({
+      manifest: RULES_MANIFEST,
+      parity: checkRuleParity({ trainingRules: RULES_MANIFEST.map((x) => x.key), accountRules: RULES_MANIFEST.map((x) => x.key) }),
+      plan: planAccountSync({ session: r.session, orders: rows }),
+    });
   })
 );
 
