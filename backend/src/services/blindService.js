@@ -16,11 +16,15 @@ import { simulateReplay } from './replayService.js';
 import { clampLimit } from '../utils/num.js';
 import { buildCheckup, buildPrescription, disciplineRate, SAMPLE_THRESHOLD } from './checkupService.js';
 import { round2, pct2 } from '../utils/time.js';
+import { identityOf } from './guestService.js';
+import { DEFAULT_BARS, MIN_BARS, DEFAULT_PRESET_KEY } from './sessionLengthService.js';
 
 const DEFAULT_CAPITAL = 1000000;
-/** 盲测片段长度（根 K 线） */
-const DEFAULT_BARS = 60;
-const MIN_BARS = 20;
+/**
+ * 盲测片段长度（根 K 线）与最小长度现由 sessionLengthService 唯一定义：
+ * RQ-107 把默认从 60 根下调为 12 根（快局），并把下限从 20 下调到 10。
+ * 两处若各写一份，「默认一局 ≤15 根」的验收口径会悄悄漂回去。
+ */
 const MAX_BARS = 200;
 /** 每 N 根 K 线要求记录一次决策（RQ-38） */
 export const DECISION_INTERVAL = 10;
@@ -188,6 +192,31 @@ function clampBars(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return DEFAULT_BARS;
   return Math.min(MAX_BARS, Math.max(MIN_BARS, Math.floor(v)));
+}
+
+/* ------------------------------------------------------------------ *
+ * RQ-108 归属：登录用户走 user_id，游客走 guest_token                  *
+ * ------------------------------------------------------------------ *
+ * 游客会话的 user_id 恒为 NULL（迁移 0019 已放开 NOT NULL），
+ * 因此所有按人查会话的 SQL 都不能再写死 `user_id=$2`。
+ * 这里统一产出归属条件，避免某个接口漏改后游客能看到别人的训练。
+ */
+
+/**
+ * @param {object} identity { userId, guestToken }
+ * @param {number} nextIndex 该条件在 SQL 中的起始占位符序号
+ * @returns {{sql:string, params:Array, nextIndex:number}}
+ */
+function ownerWhere(identity, nextIndex = 2) {
+  const id = identityOf(identity);
+  if (id.userId) {
+    return { sql: `user_id=$${nextIndex}`, params: [id.userId], nextIndex: nextIndex + 1 };
+  }
+  if (id.guestToken) {
+    return { sql: `guest_token=$${nextIndex}`, params: [id.guestToken], nextIndex: nextIndex + 1 };
+  }
+  // 无身份：用永远为假的条件，而不是放行——防止「没传身份」被当成「不过滤」
+  return { sql: 'FALSE', params: [], nextIndex };
 }
 
 /* ------------------------------------------------------------------ *
@@ -450,11 +479,14 @@ async function loadMeta(codes) {
 
 /**
  * 开始一次双盲训练。
- * @param {object} o { userId, bars, liquidOnly, code, startSeq, endSeq }
+ * @param {object} o { userId, guestToken, bars, liquidOnly, code, startSeq, endSeq, preset }
  *   指定 code/startSeq/endSeq 时走「定向片段」；否则随机（RQ-67）。
+ *   RQ-108：不传 userId 而传 guestToken 时创建**游客局**（user_id 为 NULL）。
+ *   RQ-107：preset 决定局长度档位，缺省走默认快局（12 根）。
  */
 export async function startBlind({
-  userId,
+  userId = null,
+  guestToken = null,
   bars,
   liquidOnly = true,
   code,
@@ -463,7 +495,10 @@ export async function startBlind({
   tag = null,
   prescriptionKey = null,
   granularity = DEFAULT_GRANULARITY,
+  preset = null,
 } = {}) {
+  const owner = identityOf({ userId, guestToken });
+  if (owner.anonymous) throw blindError('缺少归属身份：请登录后开始，或带上游客 token', 400);
   // RQ-81 粒度校验前置：分钟级数据未接入时必须明确拒绝，
   // 否则用户以为自己在练日内，实际拿到的是日线，训练结论会错位。
   const gkey = String(granularity || DEFAULT_GRANULARITY).toLowerCase();
@@ -491,11 +526,13 @@ export async function startBlind({
 
   const { rows } = await pool.query(
     `INSERT INTO blind_sessions
-       (user_id, stock_code, stock_name, alias, start_seq, end_seq, cursor_seq, initial_capital, status,
-        segment_tag, tag_metrics, prescription_key, granularity)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'RUNNING',$9,$10,$11,$12) RETURNING *`,
+       (user_id, guest_token, preset, stock_code, stock_name, alias, start_seq, end_seq, cursor_seq,
+        initial_capital, status, segment_tag, tag_metrics, prescription_key, granularity)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'RUNNING',$11,$12,$13,$14) RETURNING *`,
     [
-      userId,
+      owner.userId,
+      owner.guestToken,
+      String(preset || DEFAULT_PRESET_KEY).slice(0, 16),
       seg.code,
       seg.name,
       makeAlias(Date.now() ^ Math.floor(Math.random() * 0xffff)),
@@ -510,12 +547,14 @@ export async function startBlind({
     ]
   );
   logger.info('双盲训练开始', {
-    userId,
+    userId: owner.userId,
+    guest: owner.isGuest,
     sessionId: rows[0].id,
     code: seg.code,
     startSeq: seg.startSeq,
     endSeq: seg.endSeq,
     bars: n,
+    preset: preset || DEFAULT_PRESET_KEY,
     tag: seg.tag,
     prescriptionKey: prescriptionKey || null,
     granularity: gkey,
@@ -523,8 +562,16 @@ export async function startBlind({
   return rows[0];
 }
 
+/** 兼容两种调用：getBlindSession(userId, id) 与 getBlindSession({userId, guestToken}, id) */
+function asIdentity(v) {
+  if (v && typeof v === 'object') return identityOf(v);
+  return identityOf({ userId: v });
+}
+
 export async function getBlindSession(userId, sessionId, { reveal = false } = {}) {
-  const { rows } = await pool.query('SELECT * FROM blind_sessions WHERE id=$1 AND user_id=$2', [sessionId, userId]);
+  const own = asIdentity(userId);
+  const w = ownerWhere(own, 2);
+  const { rows } = await pool.query(`SELECT * FROM blind_sessions WHERE id=$1 AND ${w.sql}`, [sessionId, ...w.params]);
   if (rows.length === 0) return null;
   const session = rows[0];
   const isOver = reveal || session.status === 'FINISHED';
@@ -563,7 +610,9 @@ export async function getBlindSession(userId, sessionId, { reveal = false } = {}
 
 /** 推进游标（下一根 / 上一根 / 跳到） */
 export async function stepBlind(userId, sessionId, action = 'next', seq = null) {
-  const { rows } = await pool.query('SELECT * FROM blind_sessions WHERE id=$1 AND user_id=$2', [sessionId, userId]);
+  const own = asIdentity(userId);
+  const w = ownerWhere(own, 2);
+  const { rows } = await pool.query(`SELECT * FROM blind_sessions WHERE id=$1 AND ${w.sql}`, [sessionId, ...w.params]);
   if (rows.length === 0) return null;
   const s = rows[0];
   if (s.status === 'FINISHED') throw blindError('该训练已结束', 400);
@@ -647,12 +696,14 @@ export function buildResumeHint(session) {
 
 /** 取当前用户最近一个未结束的会话（断点续做的取数入口） */
 export async function findResumableSession(userId) {
+  const own = asIdentity(userId);
+  const w = ownerWhere(own, 1);
   const { rows } = await pool.query(
     `SELECT * FROM blind_sessions
-      WHERE user_id=$1 AND status='RUNNING'
+      WHERE ${w.sql} AND status='RUNNING'
       ORDER BY COALESCE(last_active_at, created_at) DESC
       LIMIT 1`,
-    [userId]
+    w.params
   );
   return rows.length > 0 ? rows[0] : null;
 }
@@ -673,10 +724,12 @@ export async function resumeBlind(userId) {
 
 /** 放弃这段训练：标记为 ABANDONED，之后的续做查询不再命中它 */
 export async function abandonBlind(userId, sessionId) {
+  const own = asIdentity(userId);
+  const w = ownerWhere(own, 2);
   const { rows } = await pool.query(
     `UPDATE blind_sessions SET status='ABANDONED', last_active_at=now()
-      WHERE id=$1 AND user_id=$2 AND status='RUNNING' RETURNING *`,
-    [sessionId, userId]
+      WHERE id=$1 AND ${w.sql} AND status='RUNNING' RETURNING *`,
+    [sessionId, ...w.params]
   );
   return rows.length > 0 ? rows[0] : null;
 }
@@ -715,8 +768,10 @@ async function touchSession(sessionId) {
  * RQ-38 强制决策记录                                                  *
  * ------------------------------------------------------------------ */
 
-export async function recordDecision({ userId, sessionId, action, reason, stopPlan, skipped = false }) {
-  const { rows } = await pool.query('SELECT * FROM blind_sessions WHERE id=$1 AND user_id=$2', [sessionId, userId]);
+export async function recordDecision({ userId, guestToken = null, sessionId, action, reason, stopPlan, skipped = false }) {
+  const own = identityOf({ userId, guestToken });
+  const w = ownerWhere(own, 2);
+  const { rows } = await pool.query(`SELECT * FROM blind_sessions WHERE id=$1 AND ${w.sql}`, [sessionId, ...w.params]);
   if (rows.length === 0) return null;
   const s = rows[0];
   if (s.status === 'FINISHED') throw blindError('该训练已结束，无法再记录决策', 400);
@@ -762,7 +817,12 @@ export async function listDecisions(sessionId) {
  * 直接透出真实 seq 的话，拿训练 ID 调这个接口就能把「第几根」对回交易日历（RQ-66）。
  */
 export async function listBlindDecisions(userId, sessionId) {
-  const { rows } = await pool.query('SELECT id, start_seq, status FROM blind_sessions WHERE id=$1 AND user_id=$2', [sessionId, userId]);
+  const own = asIdentity(userId);
+  const w = ownerWhere(own, 2);
+  const { rows } = await pool.query(
+    `SELECT id, start_seq, status FROM blind_sessions WHERE id=$1 AND ${w.sql}`,
+    [sessionId, ...w.params]
+  );
   if (rows.length === 0) return null;
   const s = rows[0];
   const reveal = s.status === 'FINISHED';
@@ -811,7 +871,9 @@ export function buildBlindScore({ state, decisions = [], startedAt, finishedAt, 
 }
 
 export async function finishBlind(userId, sessionId) {
-  const { rows } = await pool.query('SELECT * FROM blind_sessions WHERE id=$1 AND user_id=$2', [sessionId, userId]);
+  const own = asIdentity(userId);
+  const w = ownerWhere(own, 2);
+  const { rows } = await pool.query(`SELECT * FROM blind_sessions WHERE id=$1 AND ${w.sql}`, [sessionId, ...w.params]);
   if (rows.length === 0) return null;
   const s = rows[0];
   if (s.status === 'FINISHED') {
@@ -844,8 +906,10 @@ export async function finishBlind(userId, sessionId) {
 }
 
 /** 在盲测片段内下单（只写 blind_orders，绝不触碰真实账户，RQ-42） */
-export async function tradeInBlind({ userId, sessionId, side, quantity }) {
-  const { rows } = await pool.query('SELECT * FROM blind_sessions WHERE id=$1 AND user_id=$2', [sessionId, userId]);
+export async function tradeInBlind({ userId, guestToken = null, sessionId, side, quantity }) {
+  const own = identityOf({ userId, guestToken });
+  const w = ownerWhere(own, 2);
+  const { rows } = await pool.query(`SELECT * FROM blind_sessions WHERE id=$1 AND ${w.sql}`, [sessionId, ...w.params]);
   if (rows.length === 0) return null;
   const s = rows[0];
   if (s.status === 'FINISHED') throw blindError('该训练已结束', 400);
@@ -880,11 +944,13 @@ export async function tradeInBlind({ userId, sessionId, side, quantity }) {
 }
 
 export async function listBlindSessions(userId, limit = 20) {
+  const own = asIdentity(userId);
+  const w = ownerWhere(own, 1);
   const { rows } = await pool.query(
     `SELECT id, alias, stock_code, stock_name, start_seq, end_seq, status, score, created_at, finished_at,
-            segment_tag, granularity, prescription_key
-       FROM blind_sessions WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2`,
-    [userId, clampLimit(limit, 100, 20)]
+            segment_tag, granularity, prescription_key, preset
+       FROM blind_sessions WHERE ${w.sql} ORDER BY created_at DESC LIMIT $${w.nextIndex}`,
+    [...w.params, clampLimit(limit, 100, 20)]
   );
   return rows.map((r) => ({
     id: r.id,
@@ -904,6 +970,8 @@ export async function listBlindSessions(userId, limit = 20) {
     // RQ-81 粒度明示
     granularity: r.granularity || DEFAULT_GRANULARITY,
     prescriptionKey: r.prescription_key || null,
+    // RQ-107 局长度档位
+    preset: r.preset || 'standard',
   }));
 }
 

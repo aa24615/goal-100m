@@ -112,6 +112,9 @@ cd frontend && npm run build && cd ..
 
 # ③ 重建并启动容器
 docker compose up -d --build
+
+# ④ 发布后验证（RQ-123）—— 不验证就不算发布完成
+cd backend && node src/scripts/verifyRelease.js
 ```
 
 发布前**必须**执行一致性检查，不通过就不要发：
@@ -122,6 +125,59 @@ cd backend && npm run release:check
 
 它会校验：工作区是否干净、HEAD 是否已推送到全部远端、`dist` 资源是否完整且**不落后于源码**、
 迁移是否全部应用、README 是否写明发布三步。任一项失败即以退出码 1 阻断。
+
+发布后**必须**跑验证清单——v7 断在「提交未部署」、v10 断在「写完未提交」，两次都是发完之后没人验证：
+
+```bash
+cd backend && node src/scripts/verifyRelease.js --json
+```
+
+六项断言，任一失败即退出码 1：
+
+| # | 断言 | 判据 |
+|---|---|---|
+| 1 | `bundle-name` | 线上加载的 bundle 文件名 = 本地 `dist` 文件名（防止仍在跑旧包） |
+| 2 | `migration` | 生产 `schema_migrations` 含最新迁移版本 |
+| 3 | `routes` | 本期新增路由状态码符合预期（需登录的端点 401 即可，404 才是没发上去；已下线路由须 410） |
+| 4 | `telemetry` | 埋点**真的落库**——写入一条探针再删除，只看接口返回 200 不算数 |
+| 5 | `errors` | 发布后 `frontend_errors` 新增 0 条 |
+| 6 | `error-logs` | 发布后后端日志新增 ERROR 0 条 |
+
+## 公网入口（RQ-122）
+
+> **当前状态：未配置。** 唯一入口是本机 `http://localhost:8080`，外部设备打不开。
+> 在公网入口就绪前，获客、留存、首训转化三项在物理上都不可执行——分享链接发出去别人打不开。
+
+配置步骤：
+
+1. 准备域名。没有自有域名时可用免费泛解析过渡域名（把公网 IP 编进域名），先跑通再换正式域名：
+
+   ```bash
+   curl "http://localhost:8080/api/public/access?ip=你的公网IP"
+   # → suggestion.domain / suggestion.env 给出可直接使用的域名与 .env 行
+   ```
+
+2. 在 `.env` 写入唯一对外地址：
+
+   ```bash
+   PUBLIC_BASE_URL=https://你的域名
+   ```
+
+3. 让反代以该域名提供 HTTPS（HTTP 一律 301 跳 HTTPS）。配置片段可直接取：
+
+   ```bash
+   curl http://localhost:8080/api/public/access/nginx
+   curl http://localhost:8080/api/public/access/env
+   ```
+
+4. 自检（无需登录，部署机上直接 curl）：
+
+   ```bash
+   curl http://localhost:8080/api/public/access
+   ```
+
+   返回 `ready: true`、`blockers: []` 才算具备公网可达性；`checklist` 给出逐项完成情况，
+   `nextAction` 给出下一步该做什么。**localhost 与内网段一律判为不可对外**——防止自欺。
 
 ## 快速开始（Docker）
 

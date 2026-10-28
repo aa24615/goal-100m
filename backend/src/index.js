@@ -17,10 +17,12 @@ import orderRoutes from './routes/orders.js';
 import replayRoutes from './routes/replay.js';
 import reviewRoutes from './routes/review.js';
 import onboardingRoutes from './routes/onboarding.js';
-import scenarioRoutes from './routes/scenario.js';
-import roomRoutes from './routes/rooms.js';
 import analyticsRoutes from './routes/analytics.js';
 import blindRoutes from './routes/blind.js';
+import growthRoutes from './routes/growth.js';
+import challengeRoutes from './routes/challenge.js';
+import publicRoutes from './routes/public.js';
+import { archivedPayload } from './services/decommissionService.js';
 import { matchOrders } from './orders.js';
 import { loadMarket, startMarket, setBroadcaster, getSnapshot, onTick } from './market.js';
 import { seedStocks } from './seed.js';
@@ -98,10 +100,23 @@ export function createApp() {
   app.use('/api', replayRoutes);
   app.use('/api', reviewRoutes);
   app.use('/api', onboardingRoutes);
-  app.use('/api', scenarioRoutes);
-  app.use('/api', roomRoutes);
+
+  /**
+   * RQ-116 零使用功能**下线而非折叠**：
+   * 剧本训练场与房间赛的路由不再挂载，命中一律返回 410 Gone + 归档说明与替代入口。
+   * 用 410 而不是 404：404 会被监控系统当成故障，而这是主动下线（F-39）。
+   */
+  app.use(['/api/scenario', '/api/scenarios', '/api/rooms'], (req, res) => {
+    const path = req.originalUrl.split('?')[0].replace(/^\/api/, '').replace(/s$/, '');
+    const payload = archivedPayload(path === '/scenario' ? '/scenarios' : path === '/room' ? '/rooms' : path);
+    res.status(410).json(payload || { archived: true, message: '该功能已归档。' });
+  });
+
   app.use('/api', analyticsRoutes);
   app.use('/api', blindRoutes);
+  app.use('/api', growthRoutes);
+  app.use('/api', challengeRoutes);
+  app.use('/api', publicRoutes);
 
   // 兜底中间件必须放在所有路由之后：记录 404 与未捕获异常
   app.use(notFoundHandler);

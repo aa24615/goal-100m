@@ -30,13 +30,35 @@ export default function Login() {
     }
   };
 
+  /**
+   * RQ-128 渠道归因：从分享链接 ?ref= 取渠道并**持久化**。
+   *
+   * 持久化的理由：用户几乎不会「点开分享链接就立刻注册」——
+   * 多半是先看两眼、关掉、过一天再回来。只看当次 URL 会把这部分人全部记成 direct，
+   * 于是「哪个渠道的人会练」永远没有答案。
+   */
+  const resolveChannel = (): string | null => {
+    try {
+      const q = new URLSearchParams(window.location.search).get('ref');
+      const key = 'pt_ref';
+      if (q) {
+        localStorage.setItem(key, q);
+        return q;
+      }
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  };
+
   const onRegister = async (values: any) => {
     setRegisterLoading(true);
     try {
       await register(
         String(values.username || '').trim(),
         String(values.email || '').trim(),
-        values.password
+        values.password,
+        resolveChannel()
       );
       message.success('注册成功，已赠送 ¥1,000,000 模拟资金');
     } catch (e: any) {

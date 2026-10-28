@@ -20,6 +20,10 @@ import { trainingFunnel } from '../services/trainingFunnelService.js';
 import { northStar, acquisition } from '../services/northStarService.js';
 import { buildInbox } from '../services/notificationService.js';
 import { buildReview } from '../services/reviewService.js';
+import { guideFunnel, GUIDE_STEPS } from '../services/firstTrainingService.js';
+import { buildSmallSampleFacts } from '../services/smallSampleService.js';
+import { buildTierProgress } from '../services/tierProgressService.js';
+import { withDevice } from '../services/deviceService.js';
 import { getSnapshot } from '../market.js';
 import { optionalAuth } from '../auth.js';
 
@@ -59,13 +63,19 @@ router.get('/analytics/events', (req, res) => {
   });
 });
 
+/**
+ * 埋点上报。
+ * RQ-115：payload 自动补设备维度（mobile / tablet / desktop + 竖横屏），
+ * 否则即使有移动端会话，也回答不了「手机端完成率是多少」。
+ * 分辨率不入埋点（可用于指纹，且对可用性判断没有增量价值）。
+ */
 router.post(
   '/analytics/track',
   authMiddleware,
   asyncHandler(async (req, res) => {
     const { event, payload } = req.body || {};
     if (!isValidEvent(event)) throw businessError('未知事件类型', 400);
-    await track(req.userId, String(event), payload);
+    await track(req.userId, String(event), withDevice(payload, req));
     res.json({ ok: true });
   })
 );
@@ -213,6 +223,85 @@ router.get(
   authMiddleware,
   asyncHandler(async (req, res) => {
     res.json(await acquisition({ days: Number(req.query.days) || 30 }));
+  })
+);
+
+/* ---------------------- RQ-110 引导路径四步漏斗 ---------------------- */
+
+/**
+ * 引导漏斗：进入 → 开始 → 决策 → 结算。
+ * v9 的教训是埋点只有两步时**不足以定位断点**（F-33），
+ * 因此这里必须四步全给，并把「断点在哪一步」直接算出来。
+ */
+router.get(
+  '/analytics/guide-funnel',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const r = await guideFunnel({ days: Number(req.query.days) || 30 });
+    res.json({ ...r, steps: r.steps, stepDefs: GUIDE_STEPS });
+  })
+);
+
+/* ---------------------- RQ-111 小样本「能说的三件事」 ---------------------- */
+
+/**
+ * 小样本页面补位：成本事实 / 行为事实 / 对照事实 + 下一步动作。
+ * 硬约束 3：样本门槛不得因「页面太空」被砍——空页面用这三件事补位，
+ * 而不是塞进胜率与期望值（那才叫伪结论）。
+ */
+router.get(
+  '/analytics/small-sample',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const priceMap = {};
+    for (const q of getSnapshot()) priceMap[q.code] = q.price;
+    const review = await buildReview(req.userId, '90d', priceMap);
+    const c = review?.checkup ?? {};
+    const safe = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    res.json(
+      buildSmallSampleFacts({
+        sampleSize: safe(c.sampleSize),
+        cost: { fee: safe(c.feeTotal), slippage: safe(c.slippageTotal), turnover: safe(c.turnoverTotal) },
+        behavior: {
+          stopPlanned: safe(c.stopPlanned),
+          stopExecuted: safe(c.stopExecuted),
+          chaseHigh: safe(c.chaseHigh),
+          closed: safe(c.sampleSize),
+          medianHoldDays: Number.isFinite(Number(c.medianHoldDays)) ? Number(c.medianHoldDays) : null,
+        },
+        benchmark: {
+          returnPct: Number.isFinite(Number(c.lastReturnPct)) ? Number(c.lastReturnPct) : null,
+          buyHoldPct: Number.isFinite(Number(c.lastBuyHoldPct)) ? Number(c.lastBuyHoldPct) : null,
+        },
+      })
+    );
+  })
+);
+
+/* ---------------------- RQ-117 距下一档还差 N 笔 ---------------------- */
+
+/**
+ * 达标进度：把护栏从「拦截」改成「牵引」。
+ * 未达标也要显示还差多少、现在能确定什么；达标当日提示一次且可关闭。
+ */
+router.get(
+  '/analytics/tier-progress',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const priceMap = {};
+    for (const q of getSnapshot()) priceMap[q.code] = q.price;
+    const review = await buildReview(req.userId, '90d', priceMap);
+    const dismissed = String(req.query.dismissed || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    res.json(
+      buildTierProgress({
+        sampleSize: review?.checkup?.sampleSize ?? 0,
+        finishedRounds: review?.checkup?.finishedRounds ?? 0,
+        dismissed,
+      })
+    );
   })
 );
 

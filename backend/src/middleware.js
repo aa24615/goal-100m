@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
+import { INT32_MAX } from './utils/num.js';
 
 /**
  * HTTP 层日志中间件
@@ -172,8 +173,24 @@ export function asyncHandler(fn) {
  * 22P02（invalid input syntax for type integer），最终被 errorHandler 兜底成
  * **500 + 一条 ERROR 日志**。也就是说「用户随便填个路径」就能制造服务端错误告警，
  * 污染 5xx 指标并掩盖真实故障。这里统一拦成 400。
+ *
+ * 为什么用 isSafeInteger 而不是 isInteger：
+ * `Number.isInteger()` 只判断「数学上是整数」，不做范围约束。`'99999999999999999999'`
+ * 会被解析成 1e20，它是整数且大于 0，于是顺利通过旧校验；但 1e20 远超 PostgreSQL
+ * bigint 的上限 9223372036854775807，下发 SQL 后数据库抛
+ * **22003（value "100000000000000000000" is out of range for type bigint）**，
+ * 同样被兜成 500。实测 `GET /api/replay/99999999999999999999` 与
+ * `GET /api/blind/99999999999999999999` 均稳定复现该 500。
+ *
+ * 为什么还要额外加上 int4 上界（而不是只做 isSafeInteger）：
+ * `Number.isInteger()` 只判断「数学上是整数」，不做范围约束。本库 int4 / int8
+ * 混用（同为 ID 列也如此），而 PostgreSQL 拒绝任何超出该列类型的字面量，抛
+ * **22003（value "..." is out of range for type integer / bigint）**，最终同样
+ * 兜成 500。实测 `/api/replay/compare?startSeq=1e20` 命中的就是 **integer** 列。
+ * 因此这里取二者中更严格的 int4 上限 2147483647 —— 它同时满足 int4 与 int8，
+ * 一次性消灭整个缺陷类；而真实表的行数远低于此，绝不会误伤合法 ID。
  */
 export function parseIdParam(raw) {
   const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : null;
+  return Number.isSafeInteger(n) && n > 0 && n <= INT32_MAX ? n : null;
 }

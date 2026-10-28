@@ -10,7 +10,38 @@ import path from 'node:path';
  * - 轮转：按天切分 + 单文件超过阈值自动 .1/.2 轮转 + 过期文件清理
  */
 
-const LOG_DIR = process.env.LOG_DIR || path.resolve(process.cwd(), 'logs');
+/**
+ * 判断当前进程是否属于「本地测试运行」。
+ *
+ * node --test 会为每个测试文件派生子进程，并在其环境变量里注入 NODE_TEST_CONTEXT
+ * （实测 Node 20 取值为 'child-v8'）；NODE_ENV=test 则是 CI / 显式约定的常见写法。
+ */
+function isTestRun() {
+  return Boolean(process.env.NODE_TEST_CONTEXT) || process.env.NODE_ENV === 'test';
+}
+
+/**
+ * 日志目录解析 —— 生产与测试必须隔离。
+ *
+ * 背景：docker-compose 把宿主的 `./backend/logs` 直接挂载进容器的 `/app/logs`
+ * （见 docker-compose.yml 的 backend.volumes），而容器默认 LOG_DIR 恰好是
+ * `cwd/logs`。两侧同名 ⇒ **在宿主跑一次单元测试，日志会直接追加进当天的生产
+ * 日志文件**。后果有三：
+ *   1. 生产日志被大量 WARN/ERROR 噪声淹没 —— 2026-10-29 当天 396 条 WARN 里
+ *      有 100 条堆栈指向宿主的 `file:///D:/...` 路径，全是本地测试制造的；
+ *   2. 宿主没有 JWT_SECRET，auth.js 会打出「当前使用默认 JWT 密钥」的**假安全告警**；
+ *   3. 故障排查时被这些条目误导，把测试流量当成真实用户流量。
+ *
+ * 这里让测试进程默认落到 `logs/test/` 子目录。生产容器里的两类既有行为完全不变
+ * （容器内不注入 NODE_TEST_CONTEXT，仍写 /app/logs ⇒ 宿主 backend/logs），
+ * 显式 LOG_DIR 环境变量的优先级也保持在最前。
+ */
+const LOG_DIR =
+  process.env.LOG_DIR ||
+  (isTestRun()
+    ? path.resolve(process.cwd(), 'logs', 'test')
+    : path.resolve(process.cwd(), 'logs'));
+
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const MIN_LEVEL = LEVELS[String(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LEVELS.info;
 const MAX_FILE_SIZE = Number(process.env.LOG_MAX_SIZE || 10 * 1024 * 1024); // 默认 10MB

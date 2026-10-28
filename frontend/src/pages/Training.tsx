@@ -42,6 +42,14 @@ import {
   getRetention,
   getFunnel,
   getWeeklyReport,
+  getSessionPresets,
+  getGuideFunnel,
+  getSmallSample,
+  getTierProgress,
+  getTodayChallenge,
+  getChallengeBoard,
+  getPublicAccess,
+  trackEvent,
 } from '../api';
 import type {
   BlindResume,
@@ -49,11 +57,21 @@ import type {
   NorthStarPayload,
   InboxPayload,
   FunnelPayload,
+  GuideFunnelPayload,
+  SmallSamplePayload,
+  TierProgressPayload,
+  TodayChallengePayload,
+  ChallengeBoardPayload,
+  PublicAccessPayload,
+  PresetsPayload,
 } from '../types';
 import FirstTrainingCard from '../components/FirstTrainingCard';
+import SmallSampleFacts from '../components/SmallSampleFacts';
+import DailyChallengeCard from '../components/DailyChallengeCard';
+import TierProgressCard from '../components/TierProgressCard';
 import Disclaimer from '../components/Disclaimer';
 import { useIsMobile } from '../hooks/useIsMobile';
-import { RATIO_GUARD_THRESHOLD, RESUME_HINT_PREFIX } from '../constants';
+import { RATIO_GUARD_THRESHOLD, RESUME_HINT_PREFIX, GUIDE_EVENTS } from '../constants';
 
 const { Text, Paragraph } = Typography;
 
@@ -140,6 +158,38 @@ function NorthStarPanel({ data }: { data: NorthStarPayload | null }) {
   );
 }
 
+/* ---------------- RQ-110 引导路径四步漏斗 ---------------- */
+function GuideFunnelPanel({ data }: { data: GuideFunnelPayload | null }) {
+  if (!data) return null;
+  return (
+    <Card size="small" title="首训引导路径（四步）" data-testid="guide-funnel">
+      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+        {data.steps.map((s) => (
+          <div key={s.key} style={{ fontSize: 13 }} data-testid={`guide-step-${s.key}`}>
+            <Space size={8}>
+              <Text>{s.label}</Text>
+              <Text strong>{s.count}</Text>
+              {s.conversionFromPrev != null && (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  上一步转化 {s.conversionFromPrev}%
+                </Text>
+              )}
+            </Space>
+          </div>
+        ))}
+        <Text type="secondary" style={{ fontSize: 12 }} data-testid="guide-funnel-note">
+          {data.note}
+        </Text>
+        {data.dropAt && (
+          <Tag color="red" data-testid="guide-drop-at">
+            断点：{data.dropAt.label}
+          </Tag>
+        )}
+      </Space>
+    </Card>
+  );
+}
+
 /* ---------------- RQ-96 训练漏斗 ---------------- */
 function FunnelPanel({ data }: { data: FunnelPayload | null }) {
   if (!data) return <Card size="small" title="训练漏斗">加载中…</Card>;
@@ -214,17 +264,40 @@ export default function Training() {
   const [retention, setRetention] = useState<Record<string, unknown> | null>(null);
   const [weekly, setWeekly] = useState<Record<string, unknown> | null>(null);
   const [dismissed, setDismissed] = useState<string[]>(loadDismissed);
+  // v9 新增：RQ-106 公网可达 / RQ-107 档位 / RQ-110 引导漏斗 / RQ-111 小样本 /
+  //          RQ-113 每日一题 / RQ-117 达标进度
+  const [presets, setPresets] = useState<PresetsPayload | null>(null);
+  const [guide, setGuide] = useState<GuideFunnelPayload | null>(null);
+  const [small, setSmall] = useState<SmallSamplePayload | null>(null);
+  const [tier, setTier] = useState<TierProgressPayload | null>(null);
+  const [today, setToday] = useState<TodayChallengePayload | null>(null);
+  const [board, setBoard] = useState<ChallengeBoardPayload | null>(null);
+  const [pub, setPub] = useState<PublicAccessPayload | null>(null);
 
   const loadBase = useCallback(async () => {
-    const [r, n, c] = await Promise.all([
+    const [r, n, c, p, g, sm, tp, tc, cb, pa] = await Promise.all([
       resumeBlind().catch(() => ({ data: { resumable: false, hint: { resumable: false, text: '' }, session: null, view: null, bars: null } as BlindResume })),
       getNorthStar().catch(() => ({ data: null })),
       getCheckup().catch(() => ({ data: null })),
+      getSessionPresets().catch(() => ({ data: null })),
+      getGuideFunnel({ days: 30 }).catch(() => ({ data: null })),
+      getSmallSample().catch(() => ({ data: null })),
+      getTierProgress(dismissed).catch(() => ({ data: null })),
+      getTodayChallenge().catch(() => ({ data: null })),
+      getChallengeBoard({ days: 30 }).catch(() => ({ data: null })),
+      getPublicAccess().catch(() => ({ data: null })),
     ]);
     setResume(r.data as BlindResume);
     setNorth((n.data as NorthStarPayload) || null);
     setCheckup((c.data as CheckupPayload) || null);
-  }, []);
+    setPresets((p.data as PresetsPayload) || null);
+    setGuide((g.data as GuideFunnelPayload) || null);
+    setSmall((sm.data as SmallSamplePayload) || null);
+    setTier((tp.data as TierProgressPayload) || null);
+    setToday((tc.data as TodayChallengePayload) || null);
+    setBoard((cb.data as ChallengeBoardPayload) || null);
+    setPub((pa.data as PublicAccessPayload) || null);
+  }, [dismissed]);
 
   const loadInbox = useCallback(async (off: string[]) => {
     try {
@@ -263,10 +336,15 @@ export default function Training() {
       .catch(() => setWeekly(null));
   }, [tab]);
 
+  /**
+   * RQ-107：默认走快局（12 根 / 1–2 次判断），不再写死 60 根——
+   * 「一局要 6 次判断」正是训练一次都没走完的直接来源（F-31 / F-35）。
+   * RQ-110：声明 guide=true，让后端补齐「开始」这一步埋点。
+   */
   const startTraining = async () => {
     setStarting(true);
     try {
-      const r = await startBlind({ bars: 60 });
+      const r = await startBlind({ preset: presets?.presets?.find((x) => x.default)?.key, guide: true });
       message.success('已抽好一段真实历史行情');
       navigate(`/blind?session=${r.data.id}&first=1`);
     } catch (e: any) {
@@ -276,12 +354,38 @@ export default function Training() {
     }
   };
 
+  /** RQ-110 引导第一步：进入训练中心（看到引导卡片） */
+  const trackGuideEnter = useCallback(() => {
+    trackEvent(GUIDE_EVENTS.enter, { path: '/training' }).catch(() => {});
+  }, []);
+
+  const defaultPreset = presets?.presets?.find((x) => x.default) || null;
+
   const resumeHint = resume?.hint;
   const canResume = Boolean(resume?.resumable && resumeHint?.text);
 
   return (
     <div className={isMobile ? 'blind-mobile' : undefined}>
       <Disclaimer />
+
+      {/* RQ-106 公网可达性：没有公网入口时，获客与留存动作在物理上都不可执行（F-30）。
+          与其让它静默失败，不如把「还缺什么」直接摆在首屏。 */}
+      {pub && !pub.ready && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          data-testid="public-access-banner"
+          message="当前没有公网入口"
+          description={
+            <ul style={{ paddingLeft: 18, margin: 0, fontSize: 12 }}>
+              {pub.blockers.map((b) => (
+                <li key={b}>{b}</li>
+              ))}
+            </ul>
+          }
+        />
+      )}
 
       {/* RQ-91 断点提示：回到首页就能看到「上次停在第 N 根」，并给出继续 / 放弃两个出口 */}
       {canResume && (
@@ -359,8 +463,23 @@ export default function Training() {
                   loading={starting}
                   onStart={startTraining}
                   isMobile={isMobile}
+                  onEnter={trackGuideEnter}
+                  presetLabel={defaultPreset ? `默认${defaultPreset.label}：${defaultPreset.desc}` : undefined}
                 />
                 <NorthStarPanel data={north} />
+                {/* RQ-111 小样本补位：空页面用「能确定的三件事」填，而不是塞伪结论 */}
+                <SmallSampleFacts data={small} onAction={(p) => navigate(p)} />
+                {/* RQ-117 达标进度：护栏从拦截改为牵引 */}
+                <TierProgressCard
+                  data={tier}
+                  onDismiss={(key) => {
+                    const next = [...dismissed, key];
+                    setDismissed(next);
+                    saveDismissed(next);
+                  }}
+                />
+                {/* RQ-113 每日一题：练完之后知道下一次做什么（F-41） */}
+                <DailyChallengeCard today={today} board={board} loading={starting} onJoin={startTraining} />
               </Space>
             ),
           },
@@ -373,6 +492,7 @@ export default function Training() {
             ),
             children: (
               <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                <GuideFunnelPanel data={guide} />
                 <FunnelPanel data={funnel} />
                 <Card size="small" title="活跃与事件量" data-testid="dashboard-panel">
                   {dash ? (

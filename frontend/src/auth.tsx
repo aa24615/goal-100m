@@ -8,7 +8,7 @@ interface AuthContextValue {
   user: User | null;
   assets: { cash: number; totalAssets: number } | null;
   login: (account: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<void>;
+  register: (username: string, email: string, password: string, channel?: string | null) => Promise<void>;
   logout: () => void;
   refreshAssets: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -73,8 +73,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const register = async (username: string, email: string, password: string) => {
-    const r = await api.post<{ token: string; user: User }>('/auth/register', { username, email, password });
+  /**
+   * RQ-128 渠道归因：注册那一刻就把渠道落到用户行。
+   * 放在注册而不是首访埋点，是因为「归因随埋点顺序漂移」已经让
+   * acquisition_channel 长期全空——跨会话归因必须绑定账号，不能绑定事件顺序。
+   */
+  const register = async (username: string, email: string, password: string, channel?: string | null) => {
+    const r = await api.post<{ token: string; user: User }>('/auth/register', {
+      username,
+      email,
+      password,
+      channel: channel || undefined,
+    });
     localStorage.setItem('pt_token', r.data.token);
     setToken(r.data.token);
     setUser(r.data.user);

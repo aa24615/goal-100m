@@ -20,6 +20,15 @@ const mocks = vi.hoisted(() => ({
   getRetention: vi.fn(),
   getFunnel: vi.fn(),
   getWeeklyReport: vi.fn(),
+  // v9：RQ-106 / 107 / 110 / 111 / 113 / 117
+  getSessionPresets: vi.fn(),
+  getGuideFunnel: vi.fn(),
+  getSmallSample: vi.fn(),
+  getTierProgress: vi.fn(),
+  getTodayChallenge: vi.fn(),
+  getChallengeBoard: vi.fn(),
+  getPublicAccess: vi.fn(),
+  trackEvent: vi.fn(),
 }));
 
 vi.mock('../api', () => ({
@@ -116,6 +125,85 @@ beforeEach(() => {
       disclaimer: '本训练周报基于模拟交易行为统计，不构成投资建议，不承诺任何收益或奖励。',
     },
   });
+  // v9 默认返回值：全部按「有数据」处理，个别用例再覆盖为失败/空
+  mocks.getSessionPresets.mockResolvedValue({
+    data: {
+      presets: [
+        { key: 'quick', label: '快局', bars: 12, decisionInterval: 10, default: true, advanced: false, desc: '12 根 K 线，1–2 次判断，约 1 分钟', bestFor: '第一次训练' },
+        { key: 'standard', label: '标准局', bars: 60, decisionInterval: 10, default: false, advanced: false, desc: '60 根 K 线', bestFor: '完整趋势' },
+      ],
+      defaultBars: 12,
+      shortByDefault: true,
+      note: '',
+    },
+  });
+  mocks.getGuideFunnel.mockResolvedValue({
+    data: {
+      days: 30,
+      steps: [
+        { key: 'first_training_enter', label: '进入', count: 10, conversionFromPrev: 100, conversionFromEnter: 100 },
+        { key: 'first_training_start', label: '开始', count: 3, conversionFromPrev: 30, conversionFromEnter: 30 },
+        { key: 'first_training_decision', label: '决策', count: 1, conversionFromPrev: 33.33, conversionFromEnter: 10 },
+        { key: 'first_training_finish', label: '结算', count: 0, conversionFromPrev: 0, conversionFromEnter: 0 },
+      ],
+      dropAt: { step: 'first_training_finish', label: '结算并出成绩卡', after: 'first_training_decision' },
+      summary: { entered: 10, started: 3, decided: 1, finished: 0, completionRate: 0, medianSecToFinish: null },
+      note: '断点出现在「结算并出成绩卡」之前。',
+    },
+  });
+  mocks.getSmallSample.mockResolvedValue({
+    data: {
+      sampleSize: 12,
+      smallSample: true,
+      threshold: 30,
+      facts: [
+        { key: 'cost', kind: '成本事实', available: true, headline: '已付出手续费 12.00 元', detail: '成本是本局已发生的事实。', needsSample: false },
+        { key: 'behavior', kind: '行为事实', available: true, headline: '止损计划 3 次、执行 2 次（66.7%）', detail: '只是计数，不是推断。', needsSample: false },
+        { key: 'benchmark', kind: '对照事实', available: true, headline: '本局 +1.20% vs 买入持有 +0.80%', detail: '单次对照不说明策略好坏。', needsSample: false, netWin: 1 },
+      ],
+      sayableCount: 3,
+      nextAction: { label: '再积累 18 笔，胜率与期望值才可读', hint: '不是算不出来，是算出来也不能信。', cta: '/blind' },
+      blockedAssertions: ['胜率', '期望值', '排名'],
+      disclaimer: '样本 12 笔：成本、行为与对照三类事实不需要样本即可确认。',
+    },
+  });
+  mocks.getTierProgress.mockResolvedValue({
+    data: {
+      sampleSize: 12,
+      finishedRounds: 2,
+      tier: { key: 'none', label: '尚无样本', threshold: 0 },
+      next: { key: 'behavior', label: '行为级', threshold: 50 },
+      remainingToNext: 38,
+      reachedTop: false,
+      gates: [
+        { key: 'ratio', label: '比率类指标（胜率 / 期望值）', threshold: 30, current: 12, remaining: 18, reached: false },
+        { key: 'tier', label: '可信度升到「行为级」档', threshold: 50, current: 12, remaining: 38, reached: false },
+      ],
+      notices: [],
+      progressPct: 24,
+      message: '当前 12 笔（尚无样本档），距下一档「行为级」还差 38 笔。',
+      note: '护栏从「拦截」改为「牵引」。',
+    },
+  });
+  mocks.getTodayChallenge.mockResolvedValue({
+    data: { date: '2026-10-28', bars: 12, created: false, minRounds: 5, streak: { current: 2, longest: 3, days: ['2026-10-27', '2026-10-28'], lastDate: '2026-10-28' }, metric: '净胜局', note: '' },
+  });
+  mocks.getChallengeBoard.mockResolvedValue({
+    data: {
+      minRounds: 5,
+      board: [{ rank: 1, ref: 'u3', displayName: '张三', rounds: 6, netWin: 3, eligible: true }],
+      participants: 1,
+      waiting: [{ displayName: '李四', rounds: 2, remaining: 3 }],
+      metric: '净胜局',
+      metricDef: '跑赢「一直拿着」+1 / 跑输 −1，累加；不看绝对收益。',
+      note: '',
+      streak: { current: 2, longest: 3, days: ['2026-10-27', '2026-10-28'], lastDate: '2026-10-28' },
+    },
+  });
+  mocks.getPublicAccess.mockResolvedValue({
+    data: { ready: false, publicUrl: null, host: null, https: false, source: null, blockers: ['未配置对外地址'], checklist: [], downstream: [], note: '' },
+  });
+  mocks.trackEvent.mockResolvedValue({ data: { ok: true } });
 });
 
 /* ===================== P0 · RQ-92 首训直达 ===================== */

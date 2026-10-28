@@ -15,7 +15,7 @@
 import React from 'react';
 import { Card, Button, Space, Typography, Tag, Alert } from 'antd';
 import { ThunderboltOutlined, ClockCircleOutlined } from '@ant-design/icons';
-import { FIRST_TRAINING } from '../constants';
+import { FIRST_TRAINING, COMPLETION } from '../constants';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -27,6 +27,14 @@ export interface FirstTrainingCardProps {
   onStart: () => void | Promise<void>;
   /** 手机端：按钮变大、纵向排布 */
   isMobile?: boolean;
+  /**
+   * RQ-110 引导路径埋点「进入」这一步。
+   * 由父页面注入而不是组件直接调接口：组件保持无网络依赖，便于单测。
+   * v9 的教训是只有 start/decision 两步时无法定位断点（F-33），必须四步齐全。
+   */
+  onEnter?: () => void;
+  /** 局长度档位描述（RQ-107 短局化） */
+  presetLabel?: string;
 }
 
 export default function FirstTrainingCard({
@@ -34,7 +42,14 @@ export default function FirstTrainingCard({
   loading = false,
   onStart,
   isMobile = false,
+  onEnter,
+  presetLabel,
 }: FirstTrainingCardProps) {
+  React.useEffect(() => {
+    onEnter?.();
+    // 只在挂载时上报一次「进入」，后续重渲染不再重复计数
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <Card data-testid="first-training-card">
       <Space direction="vertical" size={8} style={{ width: '100%' }}>
@@ -75,6 +90,17 @@ export default function FirstTrainingCard({
           data-testid="first-training-note"
           message={FIRST_TRAINING.note}
         />
+
+        {/* RQ-109 完成口径：与后端 completionContract 同源，三处不再各说一套（F-32） */}
+        <Text type="secondary" style={{ fontSize: 12 }} data-testid="first-training-completion">
+          {COMPLETION.definition}：{COMPLETION.card}
+        </Text>
+
+        {presetLabel && (
+          <Tag color="blue" style={{ alignSelf: 'flex-start' }} data-testid="first-training-preset">
+            {presetLabel}
+          </Tag>
+        )}
       </Space>
     </Card>
   );

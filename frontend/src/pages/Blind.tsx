@@ -36,7 +36,9 @@ import {
   resumeBlind,
   abandonBlind,
   getScoreCard,
+  getSettlement,
 } from '../api';
+import SettlementSheet from '../components/SettlementSheet';
 import { Select } from 'antd';
 import type {
   BlindSession,
@@ -48,6 +50,7 @@ import type {
   Granularity,
   ResumeHint,
   ScoreCardPayload,
+  SettlementPayload,
 } from '../types';
 import { track } from '../utils/monitor';
 import Disclaimer from '../components/Disclaimer';
@@ -84,6 +87,7 @@ export default function Blind() {
   // RQ-91 断点提示；RQ-92 首训引导；RQ-99 成绩卡
   const [resumeHint, setResumeHint] = useState<ResumeHint | null>(null);
   const [card, setCard] = useState<ScoreCardPayload | null>(null);
+  const [settlement, setSettlement] = useState<SettlementPayload | null>(null);
   const sessionParam = Number(params.get('session') || 0);
   const firstParam = params.get('first') === '1';
   const abandonParam = Number(params.get('abandon') || 0);
@@ -235,6 +239,13 @@ export default function Blind() {
         setCard(c.data);
       } catch {
         setCard(null);
+      }
+      // RQ-125 结算口径说明书：让用户能逐笔复核成交价与费用，而不是选择相信我们
+      try {
+        const st = await getSettlement(session.id);
+        setSettlement(st.data);
+      } catch {
+        setSettlement(null);
       }
       message.success('训练结束，已揭示标的身份');
     } catch (e: any) {
@@ -529,6 +540,10 @@ export default function Blind() {
             {/* RQ-99 成绩卡：可复制带走的单次结论 */}
             <div style={{ marginTop: 12 }}>
               <ScoreCard data={card} isMobile={isMobile} />
+            </div>
+            {/* RQ-125 本局结算口径：逐笔可核对（I-13 / F-53） */}
+            <div style={{ marginTop: 12 }}>
+              <SettlementSheet data={settlement} />
             </div>
           </>
         )}

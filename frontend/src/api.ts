@@ -172,6 +172,15 @@ export const startBlind = (body?: {
   tag?: string;
   /** RQ-81 粒度，当前仅 day 可用 */
   granularity?: string;
+  /**
+   * RQ-107 局长度档位：quick(12) / standard(60) / long(120) / epic(200)。
+   * 不传即走默认快局——以前页面写死 bars:60，是「一局要 6 次判断」的直接来源（F-35）。
+   */
+  preset?: string;
+  /** RQ-110 声明这是一次引导局，用于把四步埋点补齐（进入/开始/决策/结算） */
+  guide?: boolean;
+  /** RQ-108 游客 token：未登录用户带上即可免登录练一次 */
+  guestToken?: string;
 }) => api.post<BlindStartResult>('/blind/start', body || {});
 
 /** RQ-83 训练处方：由体检单生成定向训练计划 */
@@ -238,3 +247,59 @@ export const getCheckup = (period = '30d') => api.get<CheckupPayload>('/review/c
 /* ---------------- RQ-35 埋点 ---------------- */
 export const trackEvent = (event: string, payload?: Record<string, unknown>) =>
   api.post('/analytics/track', { event, payload });
+
+/* ================= v9 增长需求（RQ-106 ~ 118） ================= */
+
+/* ---------------- RQ-106 公网可达 ---------------- */
+export const getPublicAccess = () => api.get<import('./types').PublicAccessPayload>('/config/public-access');
+
+/* ---------------- RQ-107 局长度档位 ---------------- */
+export const getSessionPresets = () => api.get<import('./types').PresetsPayload>('/blind/presets');
+
+/* ---------------- RQ-110 引导四步漏斗 ---------------- */
+export const getGuideFunnel = (params?: { days?: number }) =>
+  api.get<import('./types').GuideFunnelPayload>('/analytics/guide-funnel', { params });
+
+/* ---------------- RQ-111 小样本能说的三件事 ---------------- */
+export const getSmallSample = () => api.get<import('./types').SmallSamplePayload>('/analytics/small-sample');
+
+/* ---------------- RQ-113 每日一题 / 净胜局 / 连打 ---------------- */
+export const getTodayChallenge = () => api.get<import('./types').TodayChallengePayload>('/challenge/today');
+export const joinChallenge = (body: { sessionId: number; returnPct: number; buyHoldPct: number }) =>
+  api.post<{ ok: boolean; date: string; netWin: number; recorded: boolean }>('/challenge/join', body);
+export const getChallengeBoard = (params?: { days?: number }) =>
+  api.get<import('./types').ChallengeBoardPayload>('/challenge/board', { params });
+export const getChallengeStreak = () =>
+  api.get<{ current: number; longest: number; days: string[]; lastDate: string | null }>('/challenge/streak');
+
+/* ---------------- RQ-114 获客归因 ---------------- */
+export const buildShareLink = (channel: string, path?: string) =>
+  api.post<import('./types').ShareLinkPayload>('/attribution/link', { channel, path });
+export const attachChannel = (channel: string) => api.post<{ ok: boolean; channel: string }>('/attribution/attach', { channel });
+
+/* ---------------- RQ-116 归档清单 ---------------- */
+export const getArchived = () => api.get<{ items: import('./types').ArchivedItem[]; note: string }>('/config/archived');
+
+/* ---------------- RQ-117 达标进度 ---------------- */
+export const getTierProgress = (dismissed: string[] = []) =>
+  api.get<import('./types').TierProgressPayload>('/analytics/tier-progress', {
+    params: { dismissed: dismissed.join(',') },
+  });
+
+/* ---------------- RQ-121 / RQ-122 公网可达与游客会话 ---------------- */
+/**
+ * 规范端点（v10 RQ-121）。上方 RQ-106 的 `/config/public-access` 保留为兼容别名，
+ * 两者返回同一 payload 结构；新增调用一律走这里。
+ */
+export const getPublicAccessStatus = () => api.get<import('./types').PublicAccessPayload>('/public/access');
+export const getGuestSession = () => api.get<import('./types').GuestSessionPayload>('/guest/session');
+export const createGuestSession = (guestToken?: string | null) =>
+  api.post<import('./types').GuestSessionPayload>('/guest/session', guestToken ? { guestToken } : {});
+
+/* ---------------- RQ-125 结算口径说明书 ---------------- */
+export const getSettlement = (sessionId: number) =>
+  api.get<import('./types').SettlementPayload>(`/blind/${sessionId}/settlement`);
+
+/* ---------------- RQ-126 个人连打记录 ---------------- */
+export const getStreakRecord = (windowDays = 28) =>
+  api.get<import('./types').StreakRecordPayload>('/challenge/streak/record', { params: { windowDays } });

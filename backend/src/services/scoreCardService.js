@@ -14,7 +14,7 @@
  * 构建是纯函数：入参残缺时降级为可读文案而不是抛错。
  */
 
-import { resolveTier, RATIO_GUARD_THRESHOLD } from './checkupService.js';
+import { resolveTier, RATIO_GUARD_THRESHOLD, errorBandOf } from './checkupService.js';
 import { SEGMENT_TAGS } from './blindService.js';
 
 const ACTION_LABEL = { BUY: '买入', SELL: '卖出', HOLD: '观望' };
@@ -33,12 +33,14 @@ function num(v, digits = 2) {
  * @param {number} [o.sampleSize] 体检单里的已平仓笔数（用于算「距下一档」）
  */
 export function buildScoreCard(o) {
-  const { session = null, score = null, sampleSize } = o && typeof o === 'object' ? o : {};
+  const { session = null, score = null, sampleSize, sigma = null, expectancyR = null } = o && typeof o === 'object' ? o : {};
   const s = session && typeof session === 'object' ? session : {};
   const sc = score && typeof score === 'object' ? score : {};
 
   const n = Number.isFinite(Number(sampleSize)) ? Math.max(0, Math.floor(Number(sampleSize))) : 0;
   const tier = resolveTier(n);
+  // RQ-112 误差带进成绩页：与体检单同源（同一个 errorBandOf），不另算一套口径
+  const band = errorBandOf({ sampleSize: n, sigma, expectancyR });
 
   const tagKey = s.segment_tag || null;
   const tagLabel = tagKey ? SEGMENT_TAGS[tagKey]?.label || tagKey : '未知';
@@ -64,6 +66,10 @@ export function buildScoreCard(o) {
     lines.push(`样本 ${n} 笔 < ${RATIO_GUARD_THRESHOLD} 笔护栏，本卡不给出胜率 / 期望值类结论。`);
   }
 
+  // RQ-112 误差带 + 禁止用途：每次结算都必须带，而不是只在体检单里出现
+  lines.push(`可信度：${band.text}`);
+  lines.push(`不能拿它做什么：${band.cannot}`);
+
   const text = ['【训练成绩卡 · 赚一个小目标】', ...lines, sc.disclaimer || '模拟训练成绩基于真实历史行情，不构成投资建议，不承诺任何收益。'].join(
     '\n'
   );
@@ -74,6 +80,15 @@ export function buildScoreCard(o) {
     lines,
     text,
     copyable: true,
+    // RQ-112：成绩卡的误差带与「禁止用途」是差异化表达层，必须随卡一起可复制
+    errorBand: {
+      sampleSize: band.n,
+      bandR: band.bandR,
+      signUncertain: band.signUncertain,
+      text: band.text,
+      cannot: band.cannot,
+    },
+    cannotDo: band.cannot,
     // 硬约束：不承诺任何实物或现金奖励
     disclaimer: sc.disclaimer || '模拟训练成绩基于真实历史行情，不构成投资建议，不承诺任何收益或奖励。',
     tier: { key: tier.key, label: tier.label, remaining: tier.remaining, nextLabel: tier.next?.label ?? null },

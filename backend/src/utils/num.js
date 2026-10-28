@@ -27,3 +27,29 @@ export function clampInt(raw, min, max, fallback) {
 
 /** 语义化别名：专门用于 SQL LIMIT 的场景，读代码时一眼看出意图 */
 export const clampLimit = (raw, max, fallback) => clampInt(raw, 1, max, fallback);
+
+/**
+ * PostgreSQL `integer`（int4）列的上限。
+ *
+ * 本库里 int4 / int8 混用：主键与行情序列表有的是 bigint，有的是 integer。
+ * 只要入参可能进其中任意一类列，就只能取二者中更严格的 int4 上限做约束，
+ * 才能同时对两类列都安全。
+ */
+export const INT32_MAX = 2147483647;
+
+/**
+ * 判断一个值能否安全地写进 PostgreSQL `integer`（int4）列。
+ *
+ * 与 `clampInt` 的分工：clampInt 用于「夹取」（分页/限流），本函数用于「判定」
+ * （ID / 序号这类必须原样匹配的入参，夹取会查到错误的行，只能拒绝）。
+ *
+ * 背景：`Number.isInteger()` 只判断「数学上是整数」，不做范围约束。
+ * `'99999999999999999999'` 解析成 1e20 后是整数，顺利通过校验，下发 SQL 时
+ * PostgreSQL 抛 **22003（value "100000000000000000000" is out of range for
+ * type integer / bigint）**，被 errorHandler 兜成 500 + 一条 ERROR 日志。
+ * 实测复现：`/api/replay/compare?startSeq=1e20`、`POST /api/challenge/join`
+ * 携带 `sessionId=1e20`。
+ */
+export function isDbInt(v) {
+  return Number.isSafeInteger(v) && v >= -INT32_MAX && v <= INT32_MAX;
+}

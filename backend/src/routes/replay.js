@@ -4,6 +4,7 @@ import express from 'express';
 import { authMiddleware } from '../auth.js';
 import { asyncHandler, parseIdParam } from '../middleware.js';
 import { logger } from '../logger.js';
+import { isDbInt } from '../utils/num.js';
 import {
   getReplayRange,
   startSession,
@@ -57,7 +58,10 @@ router.get(
   asyncHandler(async (req, res) => {
     const startSeq = Number(req.query.startSeq);
     const endSeq = Number(req.query.endSeq);
-    if (!Number.isInteger(startSeq) || !Number.isInteger(endSeq)) {
+    // isDbInt：必须是整数 **且落在 PostgreSQL int4 区间内**。只判断是不是整数还不够 ——
+    // 1e20 是合法整数，却会让 compareSessions 抛 22003「out of range for type
+    // integer」并被兜成 500（实测：`?startSeq=99999999999999999999` 稳定复现）。
+    if (!isDbInt(startSeq) || !isDbInt(endSeq)) {
       return res.status(400).json({ error: '区间参数错误' });
     }
     res.json(await compareSessions({ userId: req.userId, startSeq, endSeq }));

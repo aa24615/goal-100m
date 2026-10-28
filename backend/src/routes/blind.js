@@ -2,8 +2,11 @@
 
 import express from 'express';
 import pool from '../db.js';
-import { authMiddleware } from '../auth.js';
+import { authMiddleware, optionalAuth } from '../auth.js';
 import { asyncHandler, parseIdParam, businessError } from '../middleware.js';
+import { identityOf, guestTokenFromRequest, guestQuota, normalizeGuestToken, GUEST_TODAY_SQL } from '../services/guestService.js';
+import { resolveSessionLength, DEFAULT_BARS } from '../services/sessionLengthService.js';
+import { COMPLETION, isCompleted } from '../services/completionContract.js';
 import {
   startBlind,
   getBlindSession,
@@ -24,14 +27,56 @@ import {
 import { buildPrescription } from '../services/checkupService.js';
 import { track } from '../services/analyticsService.js';
 import { buildScoreCard } from '../services/scoreCardService.js';
+import { buildSettlementSheet } from '../services/settlementService.js';
 import { planAccountSync, checkRuleParity, RULES_MANIFEST } from '../services/ruleParityService.js';
 import { buildReview } from '../services/reviewService.js';
 import { getSnapshot } from '../market.js';
 
 const router = express.Router();
 
+/**
+ * RQ-108 归属中间件：登录用户或游客均可，但**不允许匿名**。
+ *
+ * 与 authMiddleware 的区别：不再一律 401。此前注册是第一次训练的前置门槛（F-36），
+ * 用户在体验到任何价值之前就被拦下。现在带 X-Guest-Token 即可开局。
+ * 与 optionalAuth 的区别：无身份时明确 401，而不是放行——
+ * 放行会让「没传身份」被 SQL 当成「不过滤」，那是能看到别人训练的事故。
+ */
+function blindIdentity(req, res, next) {
+  optionalAuth(req, res, () => {
+    const id = identityOf({ userId: req.userId ?? null, guestToken: guestTokenFromRequest(req) });
+    if (id.anonymous) return res.status(401).json({ error: '未登录且未提供游客 token' });
+    req.blindIdentity = id;
+    next();
+  });
+}
+
+/** 游客今日已开始的局数（用于免登录额度） */
+async function guestUsedToday(token) {
+  const t = normalizeGuestToken(token);
+  if (!t) return 0;
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS c FROM blind_sessions
+      WHERE guest_token=$1 AND ${GUEST_TODAY_SQL}`,
+    [t]
+  );
+  return rows[0]?.c || 0;
+}
+
+/** RQ-110 引导埋点：由调用方显式声明这是一次引导局，避免把直连 /blind 也算进引导路径 */
+async function trackGuide(identity, step, extra = {}) {
+  const map = {
+    start: 'first_training_start',
+    decision: 'first_training_decision',
+    finish: 'first_training_finish',
+  };
+  const ev = map[step];
+  if (!ev || !identity.userId) return false;
+  return track(identity.userId, ev, extra);
+}
+
 /** RQ-82 片段类型字典 + RQ-81 可用粒度：页面据此渲染筛选项，不硬编码在前端 */
-router.get('/blind/tags', authMiddleware, (req, res) => {
+router.get('/blind/tags', optionalAuth, (req, res) => {
   res.json({
     tags: Object.values(SEGMENT_TAGS),
     granularities: GRANULARITIES,
@@ -95,25 +140,42 @@ router.post(
 // RQ-82 传 tag 即按特征抽取；RQ-81 传 granularity 指定粒度（当前仅 day 可用）
 router.post(
   '/blind/start',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
-    const { bars, liquidOnly, code, startSeq, endSeq, tag, granularity } = req.body || {};
+    const { bars, liquidOnly, code, startSeq, endSeq, tag, granularity, preset } = req.body || {};
+    const id = req.blindIdentity;
+
+    // RQ-108 免登录额度：游客每日 3 局，超出后明确提示注册，而不是静默失败
+    let quota = null;
+    if (id.isGuest) {
+      quota = guestQuota(await guestUsedToday(id.guestToken));
+      if (!quota.allowed) throw businessError(quota.message, 429);
+    }
+
+    // RQ-107 短局化：preset/bars 缺省一律走默认快局（12 根），长局需显式指定
+    const len = resolveSessionLength(preset ?? bars ?? null);
     const session = await startBlind({
-      userId: req.userId,
-      bars,
+      userId: id.userId,
+      guestToken: id.guestToken,
+      bars: len.bars,
       liquidOnly: liquidOnly !== false,
       code,
       startSeq,
       endSeq,
       tag,
       granularity: granularity || DEFAULT_GRANULARITY,
+      preset: len.key,
     });
-    await track(req.userId, 'blind_start', {
+    await track(req.userId ?? null, id.isGuest ? 'guest_training_start' : 'blind_start', {
       sessionId: session.id,
       bars: session.end_seq - session.start_seq + 1,
+      preset: len.key,
+      guest: id.isGuest,
       tag: session.segment_tag || null,
       granularity: session.granularity || DEFAULT_GRANULARITY,
     });
+    if (req.body?.guide === true) await trackGuide(id, 'start', { sessionId: session.id, preset: len.key });
+
     // 训练中绝不返回 stock_code / stock_name，也不返回 seq（seq 可对回交易日历 → 日期）
     // segment_tag 是统计口径不是身份信息，可以返回
     res.json({
@@ -124,15 +186,22 @@ router.post(
       decisionInterval: DECISION_INTERVAL,
       segmentTag: session.segment_tag || null,
       granularity: session.granularity || DEFAULT_GRANULARITY,
+      // RQ-107：让页面能回答「这一局多长、需要几次判断」
+      preset: { key: len.key, label: len.label, bars: len.bars, desc: len.desc },
+      // RQ-108：游客局要带回剩余额度与唯一的注册理由
+      guest: id.isGuest ? { quota, signupReason: quota?.signupReason ?? null } : null,
+      // RQ-109：完成口径随会话一起下发，避免前端另写一套文案
+      completion: { definition: COMPLETION.definition, status: COMPLETION.sessionStatus },
+      defaultBars: DEFAULT_BARS,
     });
   })
 );
 
 router.get(
   '/blind/history',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
-    res.json(await listBlindSessions(req.userId, Number(req.query.limit) || 20));
+    res.json(await listBlindSessions(req.blindIdentity, Number(req.query.limit) || 20));
   })
 );
 
@@ -142,11 +211,11 @@ router.get(
  */
 router.get(
   '/blind/resume',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
-    const r = await resumeBlind(req.userId);
+    const r = await resumeBlind(req.blindIdentity);
     if (r.resumable) {
-      await track(req.userId, 'blind_resume', {
+      await track(req.userId ?? null, 'blind_resume', {
         sessionId: r.session?.id ?? null,
         cursorIndex: r.hint?.cursorIndex ?? null,
         totalBars: r.hint?.totalBars ?? null,
@@ -160,7 +229,7 @@ router.get(
  * RQ-101 参数字典（唯一源）：前端一律从这里取标签与别名，
  * 不再各自硬编码，避免 sideways / range 两套写法漂移。
  */
-router.get('/blind/dict', authMiddleware, (req, res) => {
+router.get('/blind/dict', optionalAuth, (req, res) => {
   res.json({
     tags: Object.values(SEGMENT_TAGS),
     tagKeys: Object.keys(SEGMENT_TAGS),
@@ -175,13 +244,13 @@ router.get('/blind/dict', authMiddleware, (req, res) => {
 // RQ-91 放弃这段训练（与「继续」并列的两个出口）
 router.post(
   '/blind/:id/abandon',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
-    const s = await abandonBlind(req.userId, id);
+    const s = await abandonBlind(req.blindIdentity, id);
     if (!s) throw businessError('没有可放弃的进行中训练', 404);
-    await track(req.userId, 'blind_abandon', { sessionId: id });
+    await track(req.userId ?? null, 'blind_abandon', { sessionId: id });
     res.json({ ok: true, id });
   })
 );
@@ -192,22 +261,70 @@ router.post(
  */
 router.get(
   '/blind/:id/card',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
-    const r = await getBlindSession(req.userId, id, { reveal: true });
+    const r = await getBlindSession(req.blindIdentity, id, { reveal: true });
     if (!r) throw businessError('训练不存在', 404);
-    const priceMap = {};
-    for (const q of getSnapshot()) priceMap[q.code] = q.price;
-    const review = await buildReview(req.userId, '90d', priceMap);
+    // RQ-112 误差带进成绩页：样本量与 σ 优先取体检单，游客无体检单时按 0 处理（误差带会给出「无样本」文案）
+    let sampleSize = 0;
+    let sigma = null;
+    let expectancyR = null;
+    if (req.userId) {
+      const priceMap = {};
+      for (const q of getSnapshot()) priceMap[q.code] = q.price;
+      const review = await buildReview(req.userId, '90d', priceMap);
+      sampleSize = review?.checkup?.sampleSize ?? 0;
+      sigma = review?.checkup?.sigma ?? null;
+      expectancyR = review?.checkup?.expectancyR ?? null;
+    }
     const card = buildScoreCard({
       session: r.session,
       score: r.session.score || null,
-      sampleSize: review?.checkup?.sampleSize ?? 0,
+      sampleSize,
+      sigma,
+      expectancyR,
     });
-    await track(req.userId, 'score_card_view', { sessionId: id });
-    res.json(card);
+    await track(req.userId ?? null, 'score_card_view', { sessionId: id });
+    res.json({
+      ...card,
+      // RQ-109 完成口径随卡下发：完成 = 结算并出成绩卡
+      completed: isCompleted(r.session),
+      completion: { definition: COMPLETION.definition, status: COMPLETION.sessionStatus },
+    });
+  })
+);
+
+/**
+ * RQ-125 结算口径说明书（I-13 / F-53）。
+ *
+ * 用户真正会怀疑的是「这个成交价是不是假的」。一旦怀疑成立，训练价值归零——
+ * 所以这里把每一笔成交的成交价、金额、费用拆解与规则口径全部摊开，
+ * 让用户能拿计算器逐笔复核，而不是让他相信我们。
+ */
+router.get(
+  '/blind/:id/settlement',
+  blindIdentity,
+  asyncHandler(async (req, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) throw businessError('训练 ID 无效', 400);
+    const r = await getBlindSession(req.blindIdentity, id);
+    if (!r) throw businessError('训练不存在', 404);
+
+    // 未揭示（训练中）刻意不 select stock_code / stock_name —— 与双盲同一条红线
+    const { rows } = await pool.query(
+      `SELECT seq, side, quantity, price, amount, fee, realized_pnl
+         FROM blind_orders WHERE session_id=$1 ORDER BY seq ASC, id ASC`,
+      [id]
+    );
+
+    const sheet = buildSettlementSheet({
+      orders: rows,
+      session: r.session,
+      score: r.session?.score || null,
+    });
+    res.json(sheet);
   })
 );
 
@@ -217,11 +334,11 @@ router.get(
  */
 router.get(
   '/blind/:id/parity',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
-    const r = await getBlindSession(req.userId, id);
+    const r = await getBlindSession(req.blindIdentity, id);
     if (!r) throw businessError('训练不存在', 404);
     const { rows } = await pool.query(
       'SELECT seq, stock_code, stock_name, side, quantity FROM blind_orders WHERE session_id=$1 ORDER BY seq ASC',
@@ -237,11 +354,11 @@ router.get(
 
 router.get(
   '/blind/:id',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
-    const r = await getBlindSession(req.userId, id);
+    const r = await getBlindSession(req.blindIdentity, id);
     if (!r) throw businessError('训练不存在', 404);
     res.json({
       session: r.session.status === 'FINISHED'
@@ -259,6 +376,11 @@ function toSessionDto(s) {
     id: s.id,
     alias: s.alias,
     status: s.status,
+    // RQ-109 完成口径唯一源：完成 = 结算并出成绩卡（不只是「走完 60 根」）
+    completed: isCompleted(s),
+    completionDefinition: COMPLETION.definition,
+    // RQ-107 局长度档位（页面据此回答「这一局多长」）
+    preset: s.preset || 'standard',
     // 未结束时不暴露身份字段
     code: over ? s.stock_code : null,
     name: over ? s.stock_name : null,
@@ -280,11 +402,11 @@ function toSessionDto(s) {
 
 router.post(
   '/blind/:id/step',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
-    const r = await stepBlind(req.userId, id, String(req.body?.action || 'next'), req.body?.seq);
+    const r = await stepBlind(req.blindIdentity, id, String(req.body?.action || 'next'), req.body?.seq);
     if (!r) throw businessError('训练不存在', 404);
     res.json({ view: r.view, bars: r.maskedBars });
   })
@@ -293,25 +415,34 @@ router.post(
 // RQ-38 决策记录：未写理由记为「未记录」，计入纪律执行率
 router.post(
   '/blind/:id/decision',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
     const { action, reason, stopPlan, skipped } = req.body || {};
-    const r = await recordDecision({ userId: req.userId, sessionId: id, action, reason, stopPlan, skipped });
+    const r = await recordDecision({
+      userId: req.blindIdentity.userId,
+      guestToken: req.blindIdentity.guestToken,
+      sessionId: id,
+      action,
+      reason,
+      stopPlan,
+      skipped,
+    });
     if (!r) throw businessError('训练不存在', 404);
-    await track(req.userId, 'blind_decision', { sessionId: id, skipped: r.skipped });
+    await track(req.userId ?? null, 'blind_decision', { sessionId: id, skipped: r.skipped });
+    if (req.body?.guide === true) await trackGuide(req.blindIdentity, 'decision', { sessionId: id });
     res.json(r);
   })
 );
 
 router.get(
   '/blind/:id/decisions',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
-    const list = await listBlindDecisions(req.userId, id);
+    const list = await listBlindDecisions(req.blindIdentity, id);
     if (!list) throw businessError('训练不存在', 404);
     res.json(list);
   })
@@ -319,12 +450,13 @@ router.get(
 
 router.post(
   '/blind/:id/trade',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
     const r = await tradeInBlind({
-      userId: req.userId,
+      userId: req.blindIdentity.userId,
+      guestToken: req.blindIdentity.guestToken,
       sessionId: id,
       side: req.body?.side,
       quantity: req.body?.quantity,
@@ -337,18 +469,36 @@ router.post(
 // RQ-41 结束 → 揭示身份并出成绩（含纪律执行率）
 router.post(
   '/blind/:id/finish',
-  authMiddleware,
+  blindIdentity,
   asyncHandler(async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) throw businessError('训练 ID 无效', 400);
-    const r = await finishBlind(req.userId, id);
+    const r = await finishBlind(req.blindIdentity, id);
     if (!r) throw businessError('训练不存在', 404);
-    await track(req.userId, 'blind_finish', {
+    await track(req.userId ?? null, req.blindIdentity.isGuest ? 'guest_training_finish' : 'blind_finish', {
       sessionId: id,
       returnPct: r.session.score?.returnPct ?? null,
       disciplineRate: r.session.score?.disciplineRate ?? null,
     });
-    res.json({ session: toSessionDto(r.session), score: r.session.score, view: r.view });
+    if (req.body?.guide === true) await trackGuide(req.blindIdentity, 'finish', { sessionId: id });
+    res.json({
+      // RQ-109：完成 = 结算并出成绩卡。这里把 completed 与口径一起下发，
+      // 避免前端再写一套「提交判断就算完成」的旧文案（F-32）。
+      completed: isCompleted(r.session),
+      completion: { definition: COMPLETION.definition, status: COMPLETION.sessionStatus },
+      session: toSessionDto(r.session),
+      score: r.session.score,
+      view: r.view,
+      // RQ-113：净胜局由本局收益率与买入持有收益率的差算出，供「每日一题」直接取用
+      netWin:
+        Number.isFinite(Number(r.session.score?.returnPct)) && Number.isFinite(Number(r.session.score?.buyHoldPct))
+          ? Number(r.session.score.returnPct) > Number(r.session.score.buyHoldPct)
+            ? 1
+            : Number(r.session.score.returnPct) < Number(r.session.score.buyHoldPct)
+              ? -1
+              : 0
+          : null,
+    });
   })
 );
 

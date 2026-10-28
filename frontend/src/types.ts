@@ -939,3 +939,237 @@ export interface RuleParityPayload {
     rules: string[];
   };
 }
+
+/* ================= v9 增长需求（RQ-106 ~ 118） ================= */
+
+/** RQ-106 公网可达性 */
+export interface PublicAccessPayload {
+  ready: boolean;
+  publicUrl: string | null;
+  host: string | null;
+  https: boolean;
+  source: string | null;
+  blockers: string[];
+  checklist: { key: string; label: string; done: boolean }[];
+  downstream: string[];
+  note: string;
+}
+
+/** RQ-107 局长度档位 */
+export interface SessionPreset {
+  key: string;
+  label: string;
+  bars: number;
+  decisionInterval: number;
+  default: boolean;
+  advanced: boolean;
+  desc: string;
+  bestFor: string;
+  source?: string;
+}
+export interface PresetsPayload {
+  presets: SessionPreset[];
+  defaultBars: number;
+  shortByDefault: boolean;
+  note: string;
+}
+
+/** RQ-110 引导四步漏斗 */
+export interface GuideFunnelPayload {
+  days: number;
+  steps: {
+    key: string;
+    label: string;
+    count: number;
+    conversionFromPrev: number | null;
+    conversionFromEnter: number | null;
+  }[];
+  dropAt: { step: string; label: string; after: string } | null;
+  summary: {
+    entered: number;
+    started: number;
+    decided: number;
+    finished: number;
+    completionRate: number | null;
+    medianSecToFinish: number | null;
+  };
+  note: string;
+}
+
+/** RQ-111 小样本能说的三件事 */
+export interface SmallSamplePayload {
+  sampleSize: number;
+  smallSample: boolean;
+  threshold: number;
+  facts: { key: string; kind: string; available: boolean; headline: string; detail: string; needsSample: boolean; netWin?: number | null }[];
+  sayableCount: number;
+  nextAction: { label: string; hint: string; cta: string };
+  blockedAssertions: string[];
+  disclaimer: string;
+}
+
+/** RQ-113 每日一题 */
+export interface TodayChallengePayload {
+  date: string;
+  bars: number;
+  created: boolean;
+  minRounds: number;
+  streak: { current: number; longest: number; days: string[]; lastDate: string | null } | null;
+  metric: string;
+  note: string;
+}
+export interface ChallengeBoardPayload {
+  minRounds: number;
+  /** RQ-126：活跃用户不足 100 时公榜不产出内容（空榜会劝退） */
+  activeUsers?: number | null;
+  publicBoardEnabled?: boolean;
+  publicBoardMinUsers?: number;
+  boardReason?: string | null;
+  board: { rank: number; ref: string; displayName: string; rounds: number; netWin: number; eligible: boolean }[];
+  participants: number;
+  waiting: { displayName: string; rounds: number; remaining: number }[];
+  metric: string;
+  metricDef: string;
+  note: string;
+  streak?: { current: number; longest: number; days: string[]; lastDate: string | null } | null;
+  /** RQ-126 主角：个人连打记录（连打日历 + 与上周的自己比） */
+  streakRecord?: StreakRecordPayload | null;
+}
+
+/** RQ-126 个人连打记录 */
+export interface StreakRecordPayload {
+  windowDays: number;
+  calendar: { date: string; participated: boolean }[];
+  thisWeek: number;
+  lastWeek: number;
+  delta: number;
+  current: number;
+  longest: number;
+  lastDate: string | null;
+  totalDays: number;
+  comparison: string;
+  metric: string;
+  metricDef: string;
+  note: string;
+}
+
+/** RQ-125 结算口径说明书 */
+export interface SettlementRule {
+  key: string;
+  title: string;
+  body: string;
+  verifiable: string;
+}
+export interface SettlementOrderLine {
+  index: number;
+  seq: number | null;
+  side: string;
+  sideLabel: string;
+  quantity: number;
+  price: number | null;
+  amount: number;
+  fee: number;
+  feeBreakdown: {
+    amount: number;
+    commission: number;
+    stamp: number;
+    transfer: number;
+    total: number;
+    minCommissionApplied: boolean;
+  };
+  feeMatched: boolean | null;
+  recordedFee: number | null;
+  realizedPnl: number | null;
+  code: string | null;
+  name: string | null;
+  text: string;
+}
+export interface SettlementPayload {
+  title: string;
+  applicable: boolean;
+  finished: boolean;
+  reveal: boolean;
+  rules: SettlementRule[];
+  orders: SettlementOrderLine[];
+  orderCount: number;
+  totals: {
+    amount: number;
+    buyAmount: number;
+    sellAmount: number;
+    fee: number;
+    realizedPnl: number;
+  };
+  summary: string;
+  reconciliation: string;
+  feeAudit: { checked: number; mismatch: number; ok: boolean; note: string };
+  returnPct: number | null;
+  buyHoldPct: number | null;
+  text: string;
+  disclaimer: string;
+}
+
+/** RQ-122 公网可达性 */
+export interface PublicAccessPayload {
+  ready: boolean;
+  publicUrl: string | null;
+  host: string | null;
+  https: boolean;
+  blockers: string[];
+  checklist: { key: string; label: string; done: boolean }[];
+  nextAction: string;
+  suggestion: { domain: string; env: string; note: string } | null;
+}
+
+/** RQ-108 游客会话 */
+export interface GuestSessionPayload {
+  kind: 'guest' | 'user' | 'anonymous';
+  hasSession?: boolean;
+  userId: number | null;
+  guestToken: string | null;
+  created?: boolean;
+  limit?: number;
+  quota: {
+    allowed: boolean;
+    used: number;
+    remaining: number;
+    limit: number;
+    signupReason: string;
+    message: string;
+  } | null;
+  howTo?: string;
+}
+
+/** RQ-114 归因 */
+export interface ShareLinkPayload {
+  ok: boolean;
+  url: string | null;
+  channel: string;
+  reason: string | null;
+  publicReady?: boolean;
+  note?: string;
+}
+
+/** RQ-116 归档 */
+export interface ArchivedItem {
+  path: string;
+  label: string;
+  apiPrefix: string;
+  archivedAt: string;
+  reason: string;
+  replacement: { path: string; label: string } | null;
+}
+
+/** RQ-117 达标进度 */
+export interface TierProgressPayload {
+  sampleSize: number;
+  finishedRounds: number;
+  tier: { key: string; label: string; threshold: number };
+  next: { key: string; label: string; threshold: number } | null;
+  remainingToNext: number;
+  reachedTop: boolean;
+  gates: { key: string; label: string; threshold: number; current: number; remaining: number; reached: boolean }[];
+  notices: { key: string; kind: string; title: string; body: string; cannot: string; once: boolean; dismissible: boolean }[];
+  progressPct: number;
+  message: string;
+  note: string;
+}

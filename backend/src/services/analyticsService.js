@@ -33,6 +33,15 @@ export const EVENTS = [
   // RQ-92 首训直达：首训引导的开始与首次决策
   'first_training_start',
   'first_training_decision',
+  // RQ-110 引导路径四步可验证：进入 / 开始 / 决策 / 结算（v9：埋点 0 条，无法定位断点）
+  'first_training_enter',
+  'first_training_finish',
+  // RQ-113 每日一题：参与与完成分开记，用于算连打
+  'challenge_join',
+  'challenge_finish',
+  // RQ-108 免登录练一次：游客局单独计数，避免与注册用户的完成率混算
+  'guest_training_start',
+  'guest_training_finish',
   // RQ-94 看板与周报入口落地后，入口点击本身要可观测
   'dashboard_view',
   // RQ-99 成绩卡生成与复制
