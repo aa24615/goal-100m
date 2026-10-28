@@ -44,7 +44,7 @@ export default function TradePanel({
   onTraded?: () => void;
 }) {
   const { message } = App.useApp();
-  const { assets } = useAuth();
+  const { assets, refreshAssets } = useAuth();
   const [mode, setMode] = useState<'BUY' | 'SELL'>(lockedMode || 'BUY');
   const [qty, setQty] = useState<number | null>(initialQuantity || null);
   const [submitting, setSubmitting] = useState(false);
@@ -86,6 +86,14 @@ export default function TradePanel({
 
   const cash = assets?.cash ?? 0;
 
+  // F-31：assets 是 AuthProvider 里的全局快照，只在登录时拉过一次。
+  // 在个股页买入成功后若不刷新，面板里的「可用」会停在上一笔交易之前，
+  // 于是本地算出的 maxBuy 偏大、下单被后端以真实现金拒绝（2026-10-29）。
+  // 面板打开（含切换标的）即拉一次最新现金，保证「可用」与库里一致。
+  useEffect(() => {
+    refreshAssets();
+  }, [code, refreshAssets]);
+
   const calcFees = (amount: number, type: 'BUY' | 'SELL') => {
     const commission = Math.max(fees.minCommission, amount * fees.commissionRate);
     const stamp = type === 'SELL' ? amount * fees.stampRate : 0;
@@ -125,7 +133,7 @@ export default function TradePanel({
       return;
     }
     if (mode === 'BUY' && qty > maxBuy) {
-      message.warning(`可用资金不足，最多可买 ${maxBuy} 股`);
+      message.warning(`可用资金不足，最多可买 ${formatNum(maxBuy, 0)} 股`);
       return;
     }
     if (mode === 'SELL' && availableQty !== undefined && qty > maxSell) {
@@ -142,6 +150,8 @@ export default function TradePanel({
         // 携带客户端展示价，服务端校验行情是否已大幅变动
         await api.post('/trade', { code, type: mode, quantity: qty, clientPrice: price });
         message.success(`${mode === 'BUY' ? '买入' : '卖出'} ${code} ${qty} 股 成功`);
+        // 成交即改变现金/持仓，立刻回拉快照，避免下一笔沿用旧「可用」
+        await refreshAssets();
       }
       setQty(null);
       if (onTraded) onTraded();
@@ -149,6 +159,13 @@ export default function TradePanel({
       const data = e?.response?.data;
       if (e?.response?.status === 409 && data?.latestPrice) {
         message.warning(`行情已变动，最新价 ¥${formatNum(data.latestPrice)}，请确认后再下单`);
+      } else if (data?.need != null && data?.cash != null) {
+        // 服务端才知道真实可用资金：直接说出差多少，并用权威数字纠正本地陈旧快照
+        const short = data.shortfall ?? Math.round((data.need - data.cash) * 100) / 100;
+        message.error(
+          `可用资金不足：需 ¥${formatMoney(data.need)}，当前可用 ¥${formatMoney(data.cash)}，还差 ¥${formatMoney(short)}`
+        );
+        await refreshAssets();
       } else {
         message.error(data?.error || '交易失败');
       }
@@ -163,7 +180,7 @@ export default function TradePanel({
   };
 
   return (
-    <div>
+    <div data-testid="trade-panel">
       {!lockedMode && (
         <Segmented
           block
@@ -220,9 +237,9 @@ export default function TradePanel({
           </div>
         )}
         <div>
-          <div style={{ color: '#8c8c8c', marginBottom: 4 }}>
+          <div style={{ color: '#8c8c8c', marginBottom: 4 }} data-testid="trade-qty-field">
             交易数量（股）
-            <span style={{ float: 'right' }}>
+            <span style={{ float: 'right' }} data-testid="trade-cash-hint">
               {mode === 'BUY'
                 ? `可用 ${formatMoney(cash)}，最多可买 ${maxBuy} 股`
                 : availableQty !== undefined
@@ -272,6 +289,7 @@ export default function TradePanel({
           loading={submitting}
           onClick={submit}
           disabled={blockedByLimit}
+          data-testid="trade-submit"
           style={
             mode === 'SELL'
               ? { background: '#fff', color: '#0d9488', borderColor: '#0ea5a4' }

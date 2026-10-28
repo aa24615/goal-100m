@@ -74,10 +74,19 @@ export async function createOrder({ userId, code, side, limitPrice, quantity }) 
   // 下单即预估资金/持仓是否足够，提前拦截明显不可能成交的委托
   const u = await pool.query('SELECT cash FROM users WHERE id=$1', [userId]);
   if (u.rows.length === 0) return { error: '用户不存在', status: 404 };
+  const cashNow = Number(u.rows[0].cash);
   if (side === 'BUY') {
-    const need = limit * quantity + calcFees(limit * quantity, 'BUY');
-    if (need > Number(u.rows[0].cash)) {
-      return { error: `资金不足，预计需 ¥${need.toFixed(2)}`, status: 400 };
+    const needRaw = limit * quantity + calcFees(limit * quantity, 'BUY');
+    if (needRaw > cashNow) {
+      // 与市价单（tradeService）口径一致：带 need/cash/shortfall，避免用户盲试数量
+      const need = Math.round(needRaw * 100) / 100;
+      return {
+        error: `资金不足，预计需 ¥${need.toFixed(2)}`,
+        status: 400,
+        need,
+        cash: cashNow,
+        shortfall: Math.round((need - cashNow) * 100) / 100,
+      };
     }
   } else {
     const h = await pool.query('SELECT quantity, t1_qty, last_buy_date FROM holdings WHERE user_id=$1 AND stock_code=$2', [
@@ -92,7 +101,12 @@ export async function createOrder({ userId, code, side, limitPrice, quantity }) 
     const frozen = lastBuy === shToday() ? row.t1_qty || 0 : 0;
     const sellable = row ? Math.max(0, row.quantity - frozen) : 0;
     if (sellable < quantity) {
-      return { error: `可卖数量不足，当前可卖 ${sellable} 股`, status: 400 };
+      return {
+        error: `可卖数量不足，当前可卖 ${sellable} 股`,
+        status: 400,
+        want: quantity,
+        sellable,
+      };
     }
   }
 

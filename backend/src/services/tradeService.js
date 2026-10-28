@@ -48,15 +48,26 @@ export async function executeTrade({ uid, code, type, quantity, price, stockName
     if (type === 'BUY') {
       const total = amount + fee;
       if (total > cash) {
+        const need = Math.round(total * 100) / 100;
         await client.query('ROLLBACK').catch(() => {});
         logger.warn('买入失败: 可用资金不足', {
           userId: uid,
           code,
           quantity,
-          need: Math.round(total * 100) / 100,
+          need,
           cash,
         });
-        throw tradeError('可用资金不足', 400);
+        // F-31：只回一句「可用资金不足」时，用户看到的「可用」与库里不一致却无从判断，
+        // 只能反复试数量（2026-10-29 连试 472800→472700→472000 三次）。
+        // 把服务端权威的 need/cash/shortfall 一起下发，让前端能直接说出差多少。
+        throw tradeError('可用资金不足', 400, {
+          need,
+          cash,
+          shortfall: Math.round((need - cash) * 100) / 100,
+          code,
+          quantity,
+          price,
+        });
       }
       await client.query('UPDATE users SET cash = cash - $1 WHERE id=$2', [total, uid]);
 
@@ -114,7 +125,11 @@ export async function executeTrade({ uid, code, type, quantity, price, stockName
           want: quantity,
           hold: h.rows[0]?.quantity ?? 0,
         });
-        throw tradeError('可用持仓不足', 400);
+        throw tradeError('可用持仓不足', 400, {
+          want: quantity,
+          hold: h.rows[0]?.quantity ?? 0,
+          code,
+        });
       }
       const r = h.rows[0];
       const sellable = availableQty(r);
@@ -131,7 +146,8 @@ export async function executeTrade({ uid, code, type, quantity, price, stockName
           T1_ENABLED
             ? `当日买入的 ${r.t1_qty || 0} 股处于 T+1 冻结，当前可卖 ${sellable} 股`
             : '可用持仓不足',
-          400
+          400,
+          { want: quantity, sellable, frozen: r.t1_qty || 0, code }
         );
       }
       const newQty = r.quantity - quantity;

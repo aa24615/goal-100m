@@ -179,6 +179,25 @@ test('P1 资金不足买入被拒', async () => {
   assert.match(data.error, /资金/);
 });
 
+// F-31：资金不足必须把服务端口径的 need/cash/shortfall 一并下发。
+// 只回一句「可用资金不足」时，前端「可用」与库里不一致也无法自证，
+// 用户只能反复试数量（2026-10-29 连试三次 472800/472700/472000 全部被拒）。
+test('P1 资金不足时返回 needed/cash/shortfall 供前端自证', async () => {
+  const stock = await firstStock();
+  const res = await fetch(`${base}/trade`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${auth.token}` },
+    body: JSON.stringify({ code: stock.code, type: 'BUY', quantity: 100000, clientPrice: stock.price }),
+  });
+  const data = await j(res);
+  assert.equal(res.status, 400);
+  assert.equal(typeof data.need, 'number');
+  assert.equal(typeof data.cash, 'number');
+  assert.equal(typeof data.shortfall, 'number');
+  assert.ok(data.need > data.cash, `need(${data.need}) 应大于 cash(${data.cash})`);
+  assert.equal(Math.round((data.need - data.cash) * 100) / 100, data.shortfall);
+});
+
 // ---------- P1：报价偏离保护 ----------
 test('P1 报价偏离过大被拒（409）', async () => {
   const stock = await firstStock();

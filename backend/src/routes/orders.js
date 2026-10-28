@@ -31,7 +31,14 @@ router.post(
       limitPrice: Number(price),
       quantity: Number(quantity),
     });
-    if (r.error) return res.status(r.status).json({ error: r.error });
+    if (r.error) {
+      // 资金/持仓不足时把服务端口径的 need/cash/shortfall 透传，前端才能说出「差多少」
+      return res.status(r.status).json({
+        error: r.error,
+        ...(r.need != null ? { need: r.need, cash: r.cash, shortfall: r.shortfall } : {}),
+        ...(r.sellable != null ? { want: r.want, sellable: r.sellable } : {}),
+      });
+    }
     res.json(r);
   })
 );
