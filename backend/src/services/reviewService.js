@@ -360,6 +360,34 @@ export function composeReport({ rounds = [], scorecard = {}, initialCapital = 0,
 
 const PERIOD_DAYS = { '7d': 7, '30d': 30, '90d': 90, all: 0 };
 
+/**
+ * `/review/benchmark` 允许的最大回看天数（10 年）。
+ * 产品侧最长只需覆盖 `all`（0 = 全区间），这里的上界纯粹是为了防止
+ * 超大整数字面量进 `interval` 触发 22015；真实用户数据远小于此。
+ */
+const BENCHMARK_MAX_DAYS = 3650;
+
+/**
+ * 把 `/review/benchmark?days=` 的任意入参收敛成可直接拼进
+ * `($n || ' days')::interval` 的安全值。
+ *
+ * 语义约定（与原实现保持一致，合法输入的结果不变）：
+ *   - `0` 是「全区间」的哨兵值（不加时间过滤），原样保留；
+ *   - 其余有限正数收敛到 [1, BENCHMARK_MAX_DAYS]；
+ *   - NaN / Infinity / 负数 / 非法字符串一律回落缺省值。
+ *
+ * 为什么要单独抽出这个纯函数：`?days=Infinity`（含 1e309）会被拼成
+ * `interval 'Infinity days'` 触发 **22007**，`?days=2147483648` 触发
+ * **22015（interval field value out of range）**，两者都被兜成 500。
+ * 内联在服务里就无法用单测锁住这条边界（本品
+ * 的一致做法是把边界收敛到无 DB 依赖的纯函数再单测，见 utils/num.js）。
+ */
+export function normalizeBenchmarkDays(raw, fallback = 30) {
+  const n = Number(raw);
+  if (n === 0) return 0;
+  return Number.isFinite(n) && n > 0 ? Math.min(BENCHMARK_MAX_DAYS, n) : fallback;
+}
+
 export function resolvePeriod(raw) {
   const p = String(raw || '30d');
   return Object.prototype.hasOwnProperty.call(PERIOD_DAYS, p) ? p : '30d';
@@ -538,7 +566,12 @@ export async function buildReview(userId, periodRaw, priceMap = {}) {
 
 /** RQ-09 净值曲线叠加同期大盘 */
 export async function equityVsBenchmark(userId, days = 30) {
-  const d = Number(days) >= 0 ? Number(days) : 30;
+  // days=0 是「全部区间」的哨兵值（不加时间过滤），必须原样保留；
+  // 其余取值必须收敛上界：原写法只排除了 NaN/负数，`?days=Infinity`（含 1e309）
+  // 与 `?days=2147483648` 会拼进 `($n || ' days')::interval`，分别触发
+  // 22007（invalid input syntax for type interval）与
+  // 22015（interval field value out of range），最终都被兜成 500。
+  const d = normalizeBenchmarkDays(days);
   const snapArgs = [userId];
   let snapSql = `SELECT ((created_at AT TIME ZONE 'Asia/Shanghai')::date) AS d,
                         MAX(total_assets) AS total_assets

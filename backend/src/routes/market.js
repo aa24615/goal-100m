@@ -3,6 +3,7 @@ import pool from '../db.js';
 import { getSnapshot, getDetail, getSummary, getMarketStatus, forceNextSession } from '../market.js';
 import { authMiddleware } from '../auth.js';
 import { asyncHandler } from '../middleware.js';
+import { isDbInt } from '../utils/num.js';
 
 const router = express.Router();
 
@@ -39,7 +40,12 @@ router.get('/stocks/:code/daily', async (req, res, next) => {
     // 回放场景需要「按 seq 区间」取数（历史区间可能远早于最近 120 根）
     const s = Number(req.query.startSeq);
     const e = Number(req.query.endSeq);
-    const useRange = Number.isInteger(s) && Number.isInteger(e) && e >= s;
+    // isDbInt 而非 Number.isInteger：后者只判断「数学上是整数」而不做范围约束，
+    // `?endSeq=1e20` 能顺利通过判定并原样下发 SQL，PostgreSQL 抛
+    // 22003（out of range for type integer）被兜成 500。见 utils/num.js 的注释。
+    // 判定为非法时走「不启用区间」分支（取最近 N 根）—— 这与 abc/NaN 等
+    // 非区间取值既有的降级口径一致，不改变任何合法请求的结果。
+    const useRange = isDbInt(s) && isDbInt(e) && e >= s;
     const { rows } = useRange
       ? await pool.query(
           `SELECT seq, trade_date, open, high, low, close, volume, amount, prev_close

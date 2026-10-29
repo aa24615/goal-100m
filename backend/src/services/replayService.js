@@ -12,6 +12,7 @@ import pool from '../db.js';
 import { logger } from '../logger.js';
 import { calcFees } from '../fees.js';
 import { priceLimitOf } from '../rules.js';
+import { clampLimit } from '../utils/num.js';
 
 const DEFAULT_CAPITAL = 1000000;
 const MAX_RANGE_BARS = 400; // 单次回放最多允许的 bar 数，防止超大数据量拖垮查询（RK-03）
@@ -543,7 +544,11 @@ export async function finishSession({ userId, sessionId }) {
 export async function listSessions(userId, limit = 20) {
   const { rows } = await pool.query(
     `SELECT * FROM replay_sessions WHERE user_id=$1 ORDER BY started_at DESC LIMIT $2`,
-    [userId, Math.min(100, Math.max(1, Number(limit) || 20))]
+    // clampLimit 而非只夹上限：原写法 `Math.max(1, Number(limit) || 20)` 不做取整，
+    // `?limit=1.5` 会原样进 SQL 的 LIMIT（该参数在 PG 侧是 bigint），抛
+    // 22P02「invalid input syntax for type bigint: "1.5"」并被兜成 500。
+    // 口径与 blindService.listBlindSessions 一致：[1,100]，缺省 20。
+    [userId, clampLimit(limit, 100, 20)]
   );
   return rows.map(publicSession);
 }

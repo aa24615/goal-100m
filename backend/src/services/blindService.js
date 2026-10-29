@@ -13,7 +13,7 @@
 import pool from '../db.js';
 import { logger } from '../logger.js';
 import { simulateReplay } from './replayService.js';
-import { clampLimit } from '../utils/num.js';
+import { clampLimit, isDbInt } from '../utils/num.js';
 import { buildCheckup, buildPrescription, disciplineRate, SAMPLE_THRESHOLD } from './checkupService.js';
 import { round2, pct2 } from '../utils/time.js';
 import { identityOf } from './guestService.js';
@@ -510,7 +510,10 @@ export async function startBlind({
   }
 
   let seg;
-  if (code && Number.isInteger(Number(startSeq)) && Number.isInteger(Number(endSeq))) {
+  // isDbInt 而非 Number.isInteger：startSeq/endSeq 在本分支会先经过
+  // loadCloses() 下发 SQL（`seq BETWEEN`），超限整数会抛 22003 并被兜成 500。
+  // 判定为非法时回落随机片段 —— 与 abc/NaN 取值既有的降级口径一致。
+  if (code && isDbInt(Number(startSeq)) && isDbInt(Number(endSeq))) {
     seg = { code: String(code).toUpperCase(), name: '', startSeq: Number(startSeq), endSeq: Number(endSeq) };
     const { rows } = await pool.query('SELECT name FROM stocks WHERE code=$1', [seg.code]);
     if (rows.length === 0) throw blindError('标的不存在', 404);
