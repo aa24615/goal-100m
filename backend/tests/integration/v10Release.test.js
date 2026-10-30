@@ -152,6 +152,15 @@ test('P3 · RQ-108 非法游客 token 视为无身份，返回 401 而不是被�
 
 /* ==================== RQ-124 · P0 首训闭环 ==================== */
 
+/**
+ * RQ-147 改变了这条用例的前提（v12 头号修复）：
+ * `first_training_finish` 现在**只在有效完成时发送**——≥1 笔成交、走完全部 K 线、耗时 ≥10 秒。
+ * 原用例是「0 笔成交、0.29 秒」的空跑，正好是本期要拦掉的那一种：
+ * 它把北极星刷成 100%，而分子里一次真正的训练都没有。
+ *
+ * 因此用例必须改造成**一次真实训练**，而不是放宽断言：
+ *   ① 下至少一笔单；② 把 created_at 前移 30 秒模拟真实耗时（自动化跑不满 10 秒）。
+ */
 test('P0 · RQ-124 引导局产生四步埋点，可定位断点在哪一步', async () => {
   const token = await register();
   const start = await j(
@@ -162,8 +171,20 @@ test('P0 · RQ-124 引导局产生四步埋点，可定位断点在哪一步', a
     method: 'POST',
     body: { action: 'BUY', reason: '放量突破', guide: true },
   });
+  // RQ-147 门槛①：至少一笔成交
+  const trade = await call(`/blind/${start.id}/trade`, {
+    token,
+    method: 'POST',
+    body: { side: 'BUY', quantity: 100 },
+  });
+  assert.equal(trade.status, 200, `下单失败，无法构造有效完成：${JSON.stringify(await j(trade))}`);
+  // RQ-147 门槛②：耗时 ≥10 秒（自动化跑不满，这里把开训时间前移模拟真实用户）
+  await pool.query(`UPDATE blind_sessions SET created_at = now() - interval '30 seconds' WHERE id=$1`, [start.id]);
+
   const fin = await j(await call(`/blind/${start.id}/finish`, { token, method: 'POST', body: { guide: true } }));
   assert.equal(fin.completed, true);
+  assert.equal(fin.effective.effective, true, '真实训练（有成交、走完、耗时够）必须判为有效完成');
+  assert.equal(fin.effective.scoreCard.show, true);
 
   const { rows } = await pool.query(
     `SELECT event FROM analytics_events
@@ -174,6 +195,28 @@ test('P0 · RQ-124 引导局产生四步埋点，可定位断点在哪一步', a
   assert.ok(events.has('first_training_start'), '缺少「进入 → 开始」埋点');
   assert.ok(events.has('first_training_decision'), '缺少决策埋点');
   assert.ok(events.has('first_training_finish'), '缺少结算埋点');
+});
+
+/**
+ * RQ-147 的反向守护：空跑**不得**产生 first_training_finish。
+ * 这条断言是本期头号结论的回归锁——没有它，v12 的修复随时可能被悄悄回退。
+ */
+test('P0 · RQ-147 空跑的引导局不产生 first_training_finish（北极星不再被刷满）', async () => {
+  await pool.query(
+    `DELETE FROM analytics_events WHERE event IN ('first_training_start','first_training_decision','first_training_finish')`
+  );
+  const token = await register();
+  const start = await j(
+    await call('/blind/start', { token, method: 'POST', body: { preset: 'quick', guide: true } })
+  );
+  const fin = await j(await call(`/blind/${start.id}/finish`, { token, method: 'POST', body: { guide: true } }));
+  assert.equal(fin.completed, true, '形式完成仍为 true');
+  assert.equal(fin.effective.effective, false, '0 笔成交必须是无效完成');
+
+  const { rows } = await pool.query(
+    `SELECT event FROM analytics_events WHERE event = 'first_training_finish'`
+  );
+  assert.equal(rows.length, 0, '空跑不得产生 first_training_finish，否则北极星又被空跑刷满');
 });
 
 test('P0 · RQ-124 完成一局后 blind_finish 埋点首次 >0（北极星可读）', async () => {

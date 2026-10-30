@@ -37,6 +37,16 @@ import type {
   AcquisitionPayload,
   InboxPayload,
   RuleParityPayload,
+  EffectiveCompletionPayload,
+  SettlementAuditPayload,
+  DualBaselinePayload,
+  ConclusionPayload,
+  RetentionPayload,
+  TelemetryIntegrityPayload,
+  NorthStarEffectivePayload,
+  ExternalUsersPayload,
+  UserMixPayload,
+  SessionPreset,
 } from './types';
 
 const api = axios.create({ baseURL: '/api' });
@@ -209,8 +219,15 @@ export const submitDecision = (id: number, data: { action: 'BUY' | 'SELL' | 'HOL
 export const listDecisions = (id: number) => api.get<BlindDecision[]>(`/blind/${id}/decisions`);
 export const tradeBlind = (id: number, side: 'BUY' | 'SELL', quantity: number) =>
   api.post<{ ok: boolean; view: BlindView; bars: MaskedBar[] }>(`/blind/${id}/trade`, { side, quantity });
-export const finishBlind = (id: number) =>
-  api.post<{ session: BlindSession; score: BlindScore; view: BlindView }>(`/blind/${id}/finish`);
+/** RQ-147 finishBlind 会一并返回「有效完成」判定，前端据此决定出成绩卡还是出「再来一次」 */
+export const finishBlind = (id: number, guide = false) =>
+  api.post<{
+    completed: boolean;
+    effective: EffectiveCompletionPayload;
+    session: BlindSession;
+    score: BlindScore;
+    view: BlindView;
+  }>(`/blind/${id}/finish`, { guide });
 export const listBlind = (limit = 20) => api.get<BlindSession[]>('/blind/history', { params: { limit } });
 
 /* ---------------- RQ-91 断点续做 ---------------- */
@@ -297,6 +314,38 @@ export const createGuestSession = (guestToken?: string | null) =>
   api.post<import('./types').GuestSessionPayload>('/guest/session', guestToken ? { guestToken } : {});
 
 /* ---------------- RQ-125 结算口径说明书 ---------------- */
+/**
+ * RQ-150 结算口径说明书（审计层）：回答「为什么是这个价 / 扣了多少费 / 为什么被拒」。
+ * 与 getSettlement 的区别：后者给费用与对账，这里给**撮合价溯源 + 拒绝原因归类**。
+ */
+export const getSettlementAudit = (sessionId: number) =>
+  api.get<SettlementAuditPayload>(`/blind/${sessionId}/settlement/audit`);
+/** RQ-150 结算明细 CSV：与页面逐行一致（含成交与拒绝两类） */
+export const settlementAuditCsvUrl = (sessionId: number) =>
+  `/api/blind/${sessionId}/settlement/audit?format=csv`;
+/** RQ-137 双基准：买入持有 + 随机入场（运气基准），种子取会话 ID，刷新结论不变 */
+export const getDualBaseline = (sessionId: number, sampleSize = 0) =>
+  api.get<DualBaselinePayload>(`/blind/${sessionId}/baseline`, { params: { sampleSize } });
+/** RQ-154 训练记录导出（?format=csv 直接下载） */
+export const getTrainingExport = (limit = 500) =>
+  api.get<{ count: number; sessions: unknown[]; retention: RetentionPayload }>('/blind/export', { params: { limit } });
+export const trainingExportCsvUrl = (limit = 500) => `/api/blind/export?format=csv&limit=${limit}`;
+/** RQ-154 数据保留期提示（游客第 5 天起提醒转登录） */
+export const getRetentionNotice = () => api.get<RetentionPayload>('/analytics/retention-notice');
+/** RQ-152 / RQ-153 区间化结论：样本 <50 笔给三件事，≥50 笔给区间与达标线 */
+export const getConclusion = () => api.get<ConclusionPayload>('/analytics/conclusion');
+/** RQ-143 / RQ-144 埋点可信度审计 */
+export const getTelemetryIntegrity = (days = 30) =>
+  api.get<TelemetryIntegrityPayload>('/analytics/integrity', { params: { days } });
+/** RQ-147 北极星：首训有效完成率（排除测试流量） */
+export const getNorthStarEffective = (days = 30) =>
+  api.get<NorthStarEffectivePayload>('/analytics/north-star-effective', { params: { days } });
+/** RQ-148 外部真实用户漏斗 */
+export const getExternalUsers = (days = 30) =>
+  api.get<ExternalUsersPayload>('/analytics/external-users', { params: { days } });
+/** RQ-149 用户构成：真实 / 测试 各多少，指标分母是多少 */
+export const getUserMix = (days = 90) => api.get<UserMixPayload>('/analytics/user-mix', { params: { days } });
+
 export const getSettlement = (sessionId: number) =>
   api.get<import('./types').SettlementPayload>(`/blind/${sessionId}/settlement`);
 

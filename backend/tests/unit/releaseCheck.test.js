@@ -12,6 +12,8 @@ import {
   checkDistAssets,
   checkDistFreshness,
   checkReadmeReleaseDoc,
+  checkRemoteParity,
+  checkPublicEntrypoint,
   runChecks,
   REPO_ROOT,
 } from '../../src/scripts/releaseCheck.js';
@@ -84,7 +86,11 @@ test('P3 · RQ-87 跳过 DB 时不因缺少 DATABASE_URL 而崩溃', async () =>
 test('P3 · RQ-87 runChecks 在无数据库环境下仍能完成全部检查', async () => {
   await assert.doesNotReject(() => runChecks({ skipDb: true }));
   const report = await runChecks({ skipDb: true });
-  assert.equal(report.results.length, 6);
+  // RQ-145（双远端同哈希）与 RQ-142（公网入口三处一致）为 v12 新增的两项
+  assert.equal(report.results.length, 8);
+  const names = report.results.map((r) => r.name);
+  assert.ok(names.includes('remote-parity'), 'RQ-145 双远端同步校验必须纳入发布前检查');
+  assert.ok(names.includes('public-entrypoint'), 'RQ-142 公网入口审计必须纳入发布前检查');
   for (const r of report.results) {
     assert.ok(r.name && r.detail, '每个检查项都必须有名称与说明');
     assert.equal(typeof r.ok, 'boolean');
@@ -93,6 +99,55 @@ test('P3 · RQ-87 runChecks 在无数据库环境下仍能完成全部检查', a
 
 test('P3 · RQ-87 仓库根路径指向项目根目录', () => {
   assert.ok(String(REPO_ROOT).replace(/\\/g, '/').endsWith('mm8888'), `REPO_ROOT 解析异常：${REPO_ROOT}`);
+});
+
+/* ===================== RQ-145 双远端同步（v12 新增） ===================== */
+
+test('P0 · RQ-145 两个远端 HEAD 一致时通过', () => {
+  const r = checkRemoteParity(['origin', 'github']);
+  // 本机可能只有一个远端或离线；只要不抛错且结构完整即可
+  assert.ok(['remote-parity'].includes(r.name));
+  assert.equal(typeof r.ok, 'boolean');
+  assert.ok(r.detail, '必须给出可读说明，不能只回一个布尔值');
+});
+
+test('P3 · RQ-145 只有一个远端时降级为 warn 而不是失败（不能因为配置简单就阻断发布）', () => {
+  const r = checkRemoteParity(['origin']);
+  assert.equal(r.ok, true);
+  assert.equal(r.warn, true);
+  assert.match(r.detail, /无需跨远端比对/);
+});
+
+test('P3 · RQ-145 远端全部不可访问时降级为 warn（离线场景不该阻断）', () => {
+  const r = checkRemoteParity(['no-such-remote-a', 'no-such-remote-b']);
+  assert.equal(r.ok, true);
+  assert.equal(r.warn, true);
+  assert.match(r.detail, /可访问远端不足/);
+});
+
+test('P3 · RQ-145 远端列表为空时不抛错', () => {
+  assert.doesNotThrow(() => checkRemoteParity([]));
+  assert.doesNotThrow(() => checkRemoteParity(null));
+});
+
+/* ===================== RQ-142 公网入口审计（v12 新增） ===================== */
+
+test('P1 · RQ-142 公网入口检查项不阻断发布（未配好是告警，不是构建失败）', () => {
+  const r = checkPublicEntrypoint();
+  assert.equal(r.name, 'public-entrypoint');
+  assert.equal(r.ok, true, '缺公网入口是产品阻塞，不是发布阻塞');
+  assert.ok(r.audit, '必须带出审计明细，方便直接看缺哪几项');
+  assert.ok(Array.isArray(r.audit.blockers));
+});
+
+test('P3 · RQ-142 README/文件缺失时仍返回结构化结果，不抛错', () => {
+  const r = checkPublicEntrypoint({
+    existsFn: () => false,
+    readFn: () => '',
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.warn, true);
+  assert.ok(r.audit.blockers.length > 0, '文件全缺时必须列出阻断项');
 });
 
 /* ===================== P5 · 流程留痕与回归 ===================== */

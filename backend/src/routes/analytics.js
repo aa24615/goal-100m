@@ -1,6 +1,7 @@
 // 埋点路由（RQ-35）
 
 import express from 'express';
+import pool from '../db.js';
 import { authMiddleware } from '../auth.js';
 import { asyncHandler, businessError } from '../middleware.js';
 import {
@@ -24,6 +25,12 @@ import { guideFunnel, GUIDE_STEPS } from '../services/firstTrainingService.js';
 import { buildSmallSampleFacts } from '../services/smallSampleService.js';
 import { buildTierProgress } from '../services/tierProgressService.js';
 import { withDevice } from '../services/deviceService.js';
+import { auditTelemetry, purgeDuplicates } from '../services/telemetryIntegrityService.js';
+import { firstTrainingEffectiveRate } from '../services/effectiveCompletionService.js';
+import { externalUserFunnel, userMix, planTestMarks, applyTestMarks } from '../services/testTrafficService.js';
+import { markPolluted } from '../services/telemetryIntegrityService.js';
+import { buildConclusionPanel } from '../services/intervalConclusionService.js';
+import { retentionNotice, guestAgeDays } from '../services/dataRetentionService.js';
 import { getSnapshot } from '../market.js';
 import { optionalAuth } from '../auth.js';
 
@@ -326,6 +333,206 @@ router.get(
       weeklyReport(req.userId, { weekDays: 7 }),
     ]);
     res.json(buildInbox({ checkup: review?.checkup ?? null, weekly, dismissed }));
+  })
+);
+
+/* ---------------------- RQ-143 / RQ-144 埋点可信度 ---------------------- */
+
+/**
+ * 埋点审计报告：重复上报 + 埋点↔业务表一致性。
+ *
+ * 为什么单开一个接口：v12 的全部增长结论都建立在埋点上，而埋点当时是坏的
+ * （blind_resume 714 条 / 2 用户）。**先验数据可信度，再看指标**，顺序不能倒。
+ */
+router.get(
+  '/analytics/integrity',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(await auditTelemetry({ days: Number(req.query.days) || 30 }));
+  })
+);
+
+/**
+ * 清理历史重复埋点。默认 `dryRun=1` 只报数不删——删除不可逆，
+ * 且按 RK-03 的处置原则，优先打标而不是删除。
+ */
+router.post(
+  '/analytics/integrity/purge',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const apply = String(req.query.apply || req.body?.apply || '') === '1';
+    res.json(
+      await purgeDuplicates({
+        dryRun: !apply,
+        batch: Number(req.query.batch) || 5000,
+      })
+    );
+  })
+);
+
+/* ---------------------- RQ-147 北极星：首训有效完成率 ---------------------- */
+
+/**
+ * 北极星临时替换为「首训有效完成率」。
+ * 旧口径「首训完成率」已被 0 笔成交的空跑刷成 100%，指标本身作废（F-73），
+ * 这里同时返回 formalValue 以便对照说明「为什么 100% 是假的」。
+ */
+router.get(
+  '/analytics/north-star-effective',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(await firstTrainingEffectiveRate({ days: Number(req.query.days) || 30 }));
+  })
+);
+
+/* ---------------------- RQ-148 外部真实用户 ---------------------- */
+
+/**
+ * 外部用户漏斗：邀请 → 注册 → 开训 → 有效完成，并给出每一步流失数。
+ * 验收「≥5 名外部注册 / ≥2 名有效完成」直接读 `goal.met`，不再靠人工翻表。
+ */
+router.get(
+  '/analytics/external-users',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(await externalUserFunnel({ days: Number(req.query.days) || 30 }));
+  })
+);
+
+/* ---------------------- RQ-149 自测批次标记 ---------------------- */
+
+/** 打标计划预览：只算不改，先让人看清要标谁 */
+router.get(
+  '/analytics/test-marks',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 90));
+    const [u, s, mix] = await Promise.all([
+      pool.query(
+        `SELECT id, created_at AS "createdAt" FROM users WHERE created_at >= now() - ($1 || ' days')::interval`,
+        [String(days)]
+      ),
+      pool.query(
+        `SELECT id,
+                (EXTRACT(EPOCH FROM (finished_at - created_at)))::numeric AS "durationSec",
+                COALESCE((score->>'tradeCount')::int, 0) AS "tradeCount",
+                finished_at AS "finishedAt",
+                status
+           FROM blind_sessions
+          WHERE created_at >= now() - ($1 || ' days')::interval`,
+        [String(days)]
+      ),
+      userMix({ days }),
+    ]);
+    const plan = planTestMarks({ users: u.rows, sessions: s.rows });
+    res.json({ days, plan, mix });
+  })
+);
+
+/** 执行打标：必须显式 POST，避免一次误查询就把数据改了 */
+router.post(
+  '/analytics/test-marks/apply',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const days = Math.min(365, Math.max(1, Number(req.body?.days) || 90));
+    const [u, s] = await Promise.all([
+      pool.query(
+        `SELECT id, created_at AS "createdAt" FROM users WHERE created_at >= now() - ($1 || ' days')::interval`,
+        [String(days)]
+      ),
+      pool.query(
+        `SELECT id,
+                (EXTRACT(EPOCH FROM (finished_at - created_at)))::numeric AS "durationSec",
+                COALESCE((score->>'tradeCount')::int, 0) AS "tradeCount",
+                finished_at AS "finishedAt",
+                status
+           FROM blind_sessions
+          WHERE created_at >= now() - ($1 || ' days')::interval`,
+        [String(days)]
+      ),
+    ]);
+    const plan = planTestMarks({ users: u.rows, sessions: s.rows });
+    const applied = await applyTestMarks(plan);
+    // 测试用户产生的埋点一并打标，指标口径统一从 is_test 过滤
+    await markPolluted({ days }).catch(() => ({ marked: 0 }));
+    res.json({ days, plan, applied });
+  })
+);
+
+/** 用户构成：真实 / 测试各多少，指标分母是多少（RQ-149 验收） */
+router.get(
+  '/analytics/user-mix',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    res.json(await userMix({ days: Number(req.query.days) || 90 }));
+  })
+);
+
+/* ---------------------- RQ-152 / RQ-153 区间化结论 ---------------------- */
+
+/**
+ * 结论面板：样本 <50 笔给「能说的三件事」，≥50 笔给带 95% 区间的结论与达标线。
+ * 页面只按 `mode` 渲染，不再自己判断——「页面太空就塞数字进去」是伪结论的复发路径。
+ */
+router.get(
+  '/analytics/conclusion',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const priceMap = {};
+    for (const q of getSnapshot()) priceMap[q.code] = q.price;
+    const review = await buildReview(req.userId, '90d', priceMap);
+    const c = review?.checkup ?? {};
+    const n = Number.isFinite(Number(c.sampleSize)) ? Number(c.sampleSize) : 0;
+    const safe = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    res.json(
+      buildConclusionPanel({
+        sampleSize: n,
+        expectancyR: Number.isFinite(Number(c.expectancyR)) ? Number(c.expectancyR) : null,
+        sigma: Number.isFinite(Number(c.sigma)) ? Number(c.sigma) : null,
+        winRate: Number.isFinite(Number(c.winRate)) ? Number(c.winRate) : null,
+        avgWin: Number.isFinite(Number(c.avgWinR)) ? Number(c.avgWinR) : null,
+        avgLoss: Number.isFinite(Number(c.avgLossR)) ? Number(c.avgLossR) : null,
+        disciplineRate: Number.isFinite(Number(c.disciplineRate)) ? Number(c.disciplineRate) / 100 : null,
+        smallSample: {
+          cost: { fee: safe(c.feeTotal), slippage: safe(c.slippageTotal), turnover: safe(c.turnoverTotal) },
+          behavior: {
+            stopPlanned: safe(c.stopPlanned),
+            stopExecuted: safe(c.stopExecuted),
+            chaseHigh: safe(c.chaseHigh),
+            closed: n,
+            medianHoldDays: Number.isFinite(Number(c.medianHoldDays)) ? Number(c.medianHoldDays) : null,
+          },
+          benchmark: {
+            returnPct: Number.isFinite(Number(c.lastReturnPct)) ? Number(c.lastReturnPct) : null,
+            buyHoldPct: Number.isFinite(Number(c.lastBuyHoldPct)) ? Number(c.lastBuyHoldPct) : null,
+          },
+        },
+      })
+    );
+  })
+);
+
+/* ---------------------- RQ-154 数据保留期承诺 ---------------------- */
+
+/**
+ * 保留期提示：游客第 5 天起提醒转登录，登录用户明示永久保留。
+ * 页面在注册页与训练页都要显示——竞品 8 家无一明确保留期，这是可守的空位。
+ */
+router.get(
+  '/analytics/retention-notice',
+  optionalAuth,
+  asyncHandler(async (req, res) => {
+    const { guestTokenFromRequest } = await import('../services/guestService.js');
+    const token = guestTokenFromRequest(req);
+    const isGuest = !req.userId && Boolean(token);
+    let ageDays = null;
+    let sessionCount = 0;
+    if (isGuest) {
+      const g = await guestAgeDays(token).catch(() => ({ ageDays: null, sessionCount: 0 }));
+      ageDays = g.ageDays;
+      sessionCount = g.sessionCount;
+    }
+    res.json(retentionNotice({ isGuest, ageDays, sessionCount }));
   })
 );
 

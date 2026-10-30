@@ -29,6 +29,10 @@ const mocks = vi.hoisted(() => ({
   getChallengeBoard: vi.fn(),
   getPublicAccess: vi.fn(),
   trackEvent: vi.fn(),
+  // v12：RQ-151 结算入口 / RQ-152-153 区间化结论
+  listBlind: vi.fn(),
+  getConclusion: vi.fn(),
+  getRetentionNotice: vi.fn(),
 }));
 
 vi.mock('../api', () => ({
@@ -204,6 +208,56 @@ beforeEach(() => {
     data: { ready: false, publicUrl: null, host: null, https: false, source: null, blockers: ['未配置对外地址'], checklist: [], downstream: [], note: '' },
   });
   mocks.trackEvent.mockResolvedValue({ data: { ok: true } });
+  // v12 默认返回值：RQ-151 结算入口（有一局已结算）+ RQ-152/153 小样本结论
+  mocks.listBlind.mockResolvedValue({
+    data: [{ id: 9, alias: '标的 #00FF', status: 'FINISHED' }, { id: 10, alias: '标的 #00FE', status: 'RUNNING' }],
+  });
+  mocks.getConclusion.mockResolvedValue({
+    data: {
+      mode: 'three-facts',
+      sampleSize: 12,
+      threshold: 50,
+      remaining: 38,
+      facts: {
+        sampleSize: 12,
+        smallSample: true,
+        threshold: 30,
+        facts: [
+          { key: 'cost', kind: '成本事实', available: true, headline: '已付出手续费 12.00 元', detail: '成本是本局已发生的事实。', needsSample: false },
+          { key: 'behavior', kind: '行为事实', available: true, headline: '止损计划 3 次、执行 2 次', detail: '只是计数。', needsSample: false },
+          { key: 'benchmark', kind: '对照事实', available: true, headline: '本局 +1.20% vs 买入持有 +0.80%', detail: '单次对照不说明策略好坏。', needsSample: false, netWin: 1 },
+        ],
+        sayableCount: 3,
+        nextAction: { label: '再积累 38 笔', hint: '不能信。', cta: '/blind' },
+        blockedAssertions: ['胜率', '期望值'],
+        disclaimer: '样本 12 笔。',
+      },
+      interval: null,
+      headline: '样本 12 笔：这里只说现在就能确定的三件事，还差 38 笔才能谈胜率与期望值。',
+      guard: { noPointEstimateWhenSmall: true, ok: true, note: '' },
+      disclaimer: '区间描述的是这一批样本能确定到什么程度。',
+    },
+  });
+  mocks.getRetentionNotice.mockResolvedValue({
+    data: {
+      isGuest: false,
+      level: 'info',
+      title: '永久保留',
+      body: '登录后你的训练记录、成绩卡与结算明细永久保留，不因时间自动删除。',
+      daysLeft: null,
+      urgent: false,
+      cta: null,
+      exportHint: '随时可导出为 csv / json。',
+      policy: {
+        version: 'v12',
+        loggedIn: { days: null, label: '永久保留', body: '永久保留' },
+        guest: { days: 7, label: '保留 7 天', body: '游客保留 7 天' },
+        remindFromDay: 5,
+        exportFormats: ['csv', 'json'],
+        minSampleToPromise: 100,
+      },
+    },
+  });
 });
 
 /* ===================== P0 · RQ-92 首训直达 ===================== */

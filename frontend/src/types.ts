@@ -1108,6 +1108,248 @@ export interface SettlementPayload {
   disclaimer: string;
 }
 
+/* ---------------- v12 · RQ-142 ~ RQ-155 ---------------- */
+
+/** RQ-147 有效完成：形式完成之外再加三条硬门槛 */
+export interface EffectiveCompletionPayload {
+  effective: boolean;
+  completed?: boolean;
+  tradeCount: number;
+  durationSec: number | null;
+  bars: { advanced: number | null; total: number | null; full: boolean | null };
+  blockers: Array<{ key: string; title: string; body: string; cta: string; action: string; detail: string }>;
+  rules: { minTrades: number; minDurationSec: number; requireFullBars: boolean; definition: string };
+  scoreCard: {
+    show: boolean;
+    reason: string | null;
+    fallback: { title: string; body: string; cta: string; action: string } | null;
+  };
+  note: string;
+}
+
+/** RQ-150 结算口径说明书（审计层） */
+export interface SettlementAuditLine extends SettlementOrderLine {
+  priceOrigin: {
+    seq: number | null;
+    price: number | null;
+    barClose: number | null;
+    matched: boolean | null;
+    basis: string;
+    slippage: number;
+    hasQuote: boolean;
+    note: string;
+  };
+  slippage: { applied: boolean; value: number; rule: string };
+  qa: Record<string, { question: string; answer: string; verifiable: boolean; evidence: Record<string, unknown> }>;
+}
+export interface SettlementAuditPayload {
+  applicable: boolean;
+  finished: boolean;
+  reveal: boolean;
+  rules: SettlementRule[];
+  slippageRule: { hasModel: boolean; value: number; title: string; body: string; verifiable: string };
+  orders: SettlementAuditLine[];
+  orderCount: number;
+  rejections: Array<{
+    seq: number | null;
+    side: string;
+    sideLabel: string;
+    quantity: number;
+    reason: string;
+    known: boolean;
+    ruleKey: string;
+    ruleTitle: string;
+    rule: string;
+    howToVerify: string;
+    fix: string;
+    code: string | null;
+    text: string;
+  }>;
+  rejectionCount: number;
+  totals: { amount: number; fee: number; realizedPnl: number };
+  audit: {
+    priceChecked: number;
+    priceMismatch: number;
+    feeChecked: number;
+    feeMismatch: number;
+    unknownRejections: number;
+    ok: boolean;
+    note: string;
+  };
+  returnPct: number | null;
+  buyHoldPct: number | null;
+  disclaimer: string;
+}
+
+/** RQ-137 双基准（买入持有 + 随机入场） */
+export interface DualBaselinePayload {
+  bars: number;
+  returnPct: number | null;
+  buyHoldPct: number | null;
+  randomEntryPct: number | null;
+  randomEntryBandHalf: number | null;
+  randomEntryRange: { low: number; high: number } | null;
+  randomSamples: number;
+  percentileRank: number | null;
+  beatBuyHold: boolean | null;
+  beatRandomEntry: boolean | null;
+  direction: string | null;
+  directionText: string | null;
+  verdict: { level: string; text: string; conclusive: boolean; remaining?: number } | null;
+  sampleSize: number;
+  ratioVisible: boolean;
+  conclusionThreshold: number;
+  ratioThreshold: number;
+  method: string;
+  disclaimer: string;
+}
+
+/** RQ-152 区间化结论 */
+export interface ConclusionMetric {
+  key: string;
+  label: string;
+  unit: string | null;
+  kind: 'inference' | 'count';
+  sampleSize: number;
+  /** 硬约束：样本不足时 point 为 null（禁止点估计结论） */
+  point: number | null;
+  interval: { low: number; high: number; half: number; z: number; n: number } | null;
+  t: number | null;
+  threshold: { label: string; value: number; op: string; why: string } | null;
+  pass: boolean | null;
+  conclusive: boolean;
+  remaining: number;
+  verdict: { level: string; text: string; canSay: string | null };
+}
+export interface ConclusionPayload {
+  mode: 'three-facts' | 'interval';
+  sampleSize: number;
+  threshold: number;
+  remaining: number;
+  facts: SmallSamplePayload | null;
+  interval:
+    | {
+        sampleSize: number;
+        threshold: number;
+        insufficient: boolean;
+        metrics: ConclusionMetric[];
+        breakeven: {
+          winRate: number | null;
+          actual: number | null;
+          margin: number | null;
+          required: number;
+          pass: boolean | null;
+          label: string;
+          available: boolean;
+        };
+        thresholds: Record<string, { key: string; value: number; op: string; label: string; why: string }>;
+        guard: { noPointEstimateWhenSmall: boolean; ok: boolean; note: string };
+        verdict: { level: string; text: string; conclusive: boolean };
+        method: string;
+        disclaimer: string;
+      }
+    | null;
+  headline: string;
+  guard: { noPointEstimateWhenSmall: boolean; ok: boolean; note: string };
+  disclaimer: string;
+}
+
+/** RQ-154 数据保留期承诺 */
+export interface RetentionPayload {
+  isGuest: boolean;
+  level: 'info' | 'warn';
+  title: string;
+  body: string;
+  daysLeft: number | null;
+  remind?: boolean;
+  urgent: boolean;
+  cta: { label: string; action: string } | null;
+  exportHint: string;
+  policy: {
+    version: string;
+    loggedIn: { days: number | null; label: string; body: string };
+    guest: { days: number; label: string; body: string };
+    remindFromDay: number;
+    exportFormats: string[];
+    minSampleToPromise: number;
+  };
+}
+
+/** RQ-143 / RQ-144 埋点可信度 */
+export interface TelemetryIntegrityPayload {
+  days: number;
+  consistency: {
+    items: Array<{
+      key: string;
+      label: string;
+      event: string;
+      table: string;
+      eventCount: number;
+      tableCount: number;
+      diff: number;
+      match: boolean;
+      severity: string;
+      hint: string;
+    }>;
+    ok: boolean;
+    brokenCount: number;
+    detail: string;
+    note: string;
+  };
+  duplicates: {
+    duplicateKeys: number;
+    excessEvents: number;
+    byEvent: Array<{ event: string; keys: number; excess: number; maxCount: number }>;
+    worst: Array<{ event: string; userId: number | null; dedupeKey: string; count: number }>;
+    ok: boolean;
+    note: string;
+  };
+  ok: boolean;
+  note: string;
+}
+
+/** RQ-147 北极星：首训有效完成率 */
+export interface NorthStarEffectivePayload {
+  metric: string;
+  definition: string;
+  value: number | null;
+  formalValue: number | null;
+  numerator: number;
+  denominator: number;
+  finished: number;
+  testExcluded: number;
+  readable: boolean;
+  minSample: number;
+  note: string;
+  days: number;
+  rules: { minTrades: number; minDurationSec: number; requireFullBars: boolean; definition: string };
+}
+
+/** RQ-148 外部真实用户漏斗 */
+export interface ExternalUsersPayload {
+  days: number;
+  externalIds: number[];
+  steps: Array<{ key: string; label: string; count: number; conversionFromPrev: number | null; conversionFromInvited: number | null }>;
+  dropAt: { step: string; label: string; after: string } | null;
+  goal: { registered: number; effective: number };
+  dropoffs: Array<{ from: string; to: string; lost: number }>;
+  met: boolean;
+  summary: { invited: number; registered: number; started: number; effective: number };
+  note: string;
+}
+
+/** RQ-149 用户构成 */
+export interface UserMixPayload {
+  days: number;
+  total: number;
+  test: number;
+  real: number;
+  testRatio: number | null;
+  metricDenominator: number;
+  note: string;
+}
+
+
 /** RQ-122 公网可达性 */
 export interface PublicAccessPayload {
   ready: boolean;

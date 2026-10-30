@@ -37,8 +37,12 @@ import {
   abandonBlind,
   getScoreCard,
   getSettlement,
+  getSettlementAudit,
+  getDualBaseline,
+  settlementAuditCsvUrl,
 } from '../api';
 import SettlementSheet from '../components/SettlementSheet';
+import SettlementAuditPanel from '../components/SettlementAuditPanel';
 import { Select } from 'antd';
 import type {
   BlindSession,
@@ -51,6 +55,10 @@ import type {
   ResumeHint,
   ScoreCardPayload,
   SettlementPayload,
+  SettlementAuditPayload,
+  DualBaselinePayload,
+  SessionPreset,
+  EffectiveCompletionPayload,
 } from '../types';
 import { track } from '../utils/monitor';
 import Disclaimer from '../components/Disclaimer';
@@ -72,6 +80,12 @@ export default function Blind() {
   const [tags, setTags] = useState<SegmentTag[]>([]);
   const [tag, setTag] = useState<string | undefined>(undefined);
   const [granularities, setGranularities] = useState<Granularity[]>([]);
+  /**
+   * RQ-146 局长度档位：默认 quick（12 根）。
+   * 档位列表从服务端 `/blind/dict` 或 start 响应里取，不在前端硬编码 60。
+   */
+  const [presets, setPresets] = useState<SessionPreset[]>([]);
+  const [preset, setPreset] = useState<string>('quick');
   const [session, setSession] = useState<BlindSession | null>(null);
   const [view, setView] = useState<BlindView | null>(null);
   const [bars, setBars] = useState<MaskedBar[]>([]);
@@ -88,6 +102,11 @@ export default function Blind() {
   const [resumeHint, setResumeHint] = useState<ResumeHint | null>(null);
   const [card, setCard] = useState<ScoreCardPayload | null>(null);
   const [settlement, setSettlement] = useState<SettlementPayload | null>(null);
+  // RQ-147 有效完成判定：未达门槛时不出成绩卡，改出「再来一次」（F-80）
+  const [effective, setEffective] = useState<EffectiveCompletionPayload | null>(null);
+  // RQ-150 结算口径说明书（审计层）与 RQ-137 双基准
+  const [audit, setAudit] = useState<SettlementAuditPayload | null>(null);
+  const [baseline, setBaseline] = useState<DualBaselinePayload | null>(null);
   const sessionParam = Number(params.get('session') || 0);
   const firstParam = params.get('first') === '1';
   const abandonParam = Number(params.get('abandon') || 0);
@@ -104,6 +123,19 @@ export default function Blind() {
         setTags([]);
         setGranularities([]);
       });
+    // RQ-146 局长度档位：缺省 12 根；长局（60 根）作为可选项而不是默认
+    api
+      .get<{ presets?: SessionPreset[] }>('/blind/presets')
+      .then((r) => {
+        const list = (r.data.presets || []).filter((p) => !p.advanced);
+        if (list.length) {
+          setPresets(list);
+          const d = list.find((p) => p.default) || list[0];
+          // 守护：默认档位必须 ≤15 根，否则首训仍然是一局长局
+          if (d && d.bars <= 15) setPreset(d.key);
+        }
+      })
+      .catch(() => setPresets([]));
   }, []);
 
   const load = async (id: number) => {
@@ -151,7 +183,12 @@ export default function Blind() {
   const start = async () => {
     setBusy(true);
     try {
-      const r = await startBlind({ bars: 60, tag });
+      /**
+       * RQ-146 首训默认短局（≤15 根）。
+       * 此前这里硬编码 `bars: 60`，是「一局要 6 次判断、三个会话全部半途而废」的直接来源（F-79）。
+       * 现在默认走后端 quick 档（12 根 / 1–2 次判断），长局由用户在页面上显式切换。
+       */
+      const r = await startBlind({ preset, tag });
       setSession({
         id: r.data.id,
         alias: r.data.alias,
@@ -229,15 +266,25 @@ export default function Blind() {
   const finish = async () => {
     if (!session) return;
     try {
-      const r = await finishBlind(session.id);
+      const r = await finishBlind(session.id, firstParam);
       setScore(r.data.score);
       setSession(r.data.session);
       setView(r.data.view);
-      // RQ-99 成绩卡：数字与体检单同源，可复制带走
-      try {
-        const c = await getScoreCard(session.id);
-        setCard(c.data);
-      } catch {
+      /**
+       * RQ-147：有效完成判定优先于一切展示。
+       * 未达门槛（0 笔成交 / 走太快 / 没走完）时**不取成绩卡**，
+       * 否则用户会拿到一张「成交 0 笔、纪律执行率 100%」的自相矛盾卡片（F-80）。
+       */
+      const eff = (r.data as any)?.effective || null;
+      setEffective(eff);
+      if (!eff || eff.scoreCard?.show !== false) {
+        try {
+          const c = await getScoreCard(session.id);
+          setCard(c.data);
+        } catch {
+          setCard(null);
+        }
+      } else {
         setCard(null);
       }
       // RQ-125 结算口径说明书：让用户能逐笔复核成交价与费用，而不是选择相信我们
@@ -247,7 +294,23 @@ export default function Blind() {
       } catch {
         setSettlement(null);
       }
-      message.success('训练结束，已揭示标的身份');
+      // RQ-150 审计层：撮合价溯源 + 拒绝原因归类（差异清单 ≥5 条，可一键复制）
+      try {
+        const a = await getSettlementAudit(session.id);
+        setAudit(a.data);
+      } catch {
+        setAudit(null);
+      }
+      // RQ-137 双基准：买入持有 + 随机入场（运气基准）
+      try {
+        const b = await getDualBaseline(session.id, 0);
+        setBaseline(b.data);
+      } catch {
+        setBaseline(null);
+      }
+      message.success(
+        eff && eff.effective === false ? '训练结束，但本局未达有效完成门槛' : '训练结束，已揭示标的身份'
+      );
     } catch (e: any) {
       message.error(e?.response?.data?.error || '生成成绩失败');
     }
@@ -280,6 +343,20 @@ export default function Blind() {
               style={{ width: isMobile ? 120 : 150 }}
               options={tags.map((t) => ({ label: t.label, value: t.key }))}
               data-testid="blind-tag-select"
+            />
+            {/* RQ-146 局长度：默认快局（12 根），长局可选但不是默认 */}
+            <Select
+              value={preset}
+              onChange={setPreset}
+              style={{ width: isMobile ? 96 : 110 }}
+              data-testid="blind-preset-select"
+              options={(presets.length
+                ? presets
+                : [{ key: 'quick', label: '快局', bars: 12 }, { key: 'standard', label: '标准局', bars: 60 }]
+              ).map((p) => ({
+                label: `${p.label}（${p.bars} 根）`,
+                value: p.key,
+              }))}
             />
             <Button icon={<ThunderboltOutlined />} type="primary" loading={busy} onClick={start} data-testid="blind-start">
               随机来一段
@@ -537,14 +614,72 @@ export default function Blind() {
             <Paragraph type="secondary" style={{ fontSize: 12 }}>
               纪律执行率 = 已写理由或计划止损的决策点 ÷ 全部决策点。{score.disclaimer}
             </Paragraph>
-            {/* RQ-99 成绩卡：可复制带走的单次结论 */}
-            <div style={{ marginTop: 12 }}>
-              <ScoreCard data={card} isMobile={isMobile} />
-            </div>
+            {/* RQ-147 未达有效完成门槛：出「再来一次」而不是一张 0 笔成交的成绩卡 */}
+            {effective && effective.scoreCard?.show === false && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 12 }}
+                data-testid="blind-effective-gate"
+                message={effective.scoreCard.fallback?.title || '这一局未达有效完成门槛'}
+                description={
+                  <div>
+                    <div>{effective.scoreCard.fallback?.body}</div>
+                    <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>{effective.note}</div>
+                    <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
+                      门槛：至少 {effective.rules?.minTrades} 笔成交 · 走完全部 K 线 · 耗时不少于{' '}
+                      {effective.rules?.minDurationSec} 秒
+                    </div>
+                    <Button
+                      style={{ marginTop: 8 }}
+                      data-testid="blind-effective-retry"
+                      onClick={() => {
+                        setScore(null);
+                        setSession(null);
+                        setView(null);
+                        setBars([]);
+                        setEffective(null);
+                        setAudit(null);
+                        setBaseline(null);
+                        void start();
+                      }}
+                    >
+                      {effective.scoreCard.fallback?.cta || '再来一局'}
+                    </Button>
+                  </div>
+                }
+              />
+            )}
+            {/* RQ-99 成绩卡：可复制带走的单次结论（仅在有效完成时展示） */}
+            {(!effective || effective.scoreCard?.show !== false) && (
+              <div style={{ marginTop: 12 }}>
+                <ScoreCard data={card} isMobile={isMobile} />
+              </div>
+            )}
             {/* RQ-125 本局结算口径：逐笔可核对（I-13 / F-53） */}
             <div style={{ marginTop: 12 }}>
               <SettlementSheet data={settlement} />
             </div>
+            {/* RQ-150 结算口径说明书 · 审计层：为什么是这个价 / 扣了多少费 / 为什么被拒 */}
+            <div style={{ marginTop: 12 }}>
+              <SettlementAuditPanel data={audit} sessionId={session?.id ?? null} />
+            </div>
+            {/* RQ-137 双基准：跑赢「一直拿着」还不够，还要跑赢「闭眼随便挑一天」 */}
+            {baseline && baseline.verdict && (
+              <Alert
+                type={baseline.verdict.conclusive ? 'success' : 'info'}
+                showIcon={false}
+                style={{ marginTop: 12 }}
+                data-testid="blind-dual-baseline"
+                message="双基准对照"
+                description={
+                  <>
+                    <div>{baseline.verdict.text}</div>
+                    <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>{baseline.method}</div>
+                  </>
+                }
+              />
+            )}
           </>
         )}
       </Card>

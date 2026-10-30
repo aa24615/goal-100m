@@ -19,11 +19,27 @@ import {
 } from 'antd';
 import { DownloadOutlined, ShareAltOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import api, { getReview, getAbility, getShareCard, getCheckup, startPrescription } from '../api';
-import type { ReviewPayload, AbilityRadar, ShareCard, CheckupPayload } from '../types';
+import api, {
+  getReview,
+  getAbility,
+  getShareCard,
+  getCheckup,
+  startPrescription,
+  listBlind,
+  getConclusion,
+} from '../api';
+import type {
+  ReviewPayload,
+  AbilityRadar,
+  ShareCard,
+  CheckupPayload,
+  ConclusionPayload,
+} from '../types';
 import { formatMoney, formatNum, formatPct } from '../utils';
 import ScoreRadar from '../components/ScoreRadar';
 import CheckupPanel from '../components/CheckupPanel';
+import SettlementEntryCard from '../components/SettlementEntryCard';
+import IntervalConclusion from '../components/IntervalConclusion';
 import Disclaimer from '../components/Disclaimer';
 import { track } from '../utils/monitor';
 import { SAMPLE_THRESHOLD } from '../constants';
@@ -47,6 +63,23 @@ export default function Review() {
   const [card, setCard] = useState<ShareCard | null>(null);
   const [loading, setLoading] = useState(false);
   const [checkup, setCheckup] = useState<CheckupPayload | null>(null);
+  // v12 RQ-151 结算入口（复盘页也要能进） / RQ-152-153 区间化结论
+  const [lastFinishedId, setLastFinishedId] = useState<number | null>(null);
+  const [conclusion, setConclusion] = useState<ConclusionPayload | null>(null);
+
+  useEffect(() => {
+    // RQ-151：结算说明书不能只在成绩区里，复盘页是最常来的第二入口
+    listBlind(10)
+      .then((r) => {
+        const done = (r.data || []).find((s: any) => s && s.status === 'FINISHED');
+        setLastFinishedId(done ? done.id : null);
+      })
+      .catch(() => setLastFinishedId(null));
+    getConclusion()
+      .then((r) => setConclusion(r.data || null))
+      .catch(() => setConclusion(null));
+  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     setLoading(true);
@@ -102,6 +135,20 @@ export default function Review() {
               message.error(e?.response?.data?.error || '生成训练处方失败，请稍后重试');
             }
           }}
+        />
+      </div>
+
+      {/* RQ-152 / RQ-153 结论一律带区间：样本不足时只给「能说的三件事」，不给点估计 */}
+      <div style={{ marginBottom: 16 }}>
+        <IntervalConclusion data={conclusion} />
+      </div>
+
+      {/* RQ-151 结算入口扩面：复盘页也能进结算口径说明书 */}
+      <div style={{ marginBottom: 16 }}>
+        <SettlementEntryCard
+          lastFinishedId={lastFinishedId}
+          onOpen={(id) => navigate(`/blind?session=${id}`)}
+          compact
         />
       </div>
 

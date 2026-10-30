@@ -4,8 +4,9 @@ import jwt from 'jsonwebtoken';
 import { randomBytes, createHash } from 'node:crypto';
 import pool from './db.js';
 import { logger } from './logger.js';
-import { asyncHandler } from './middleware.js';
+import { asyncHandler, proxyClientIp } from './middleware.js';
 import { track } from './services/analyticsService.js';
+import { trackOnce } from './services/telemetryIntegrityService.js';
 import { normalizeChannel } from './services/northStarService.js';
 
 const router = express.Router();
@@ -167,16 +168,24 @@ router.post(
     }
     const hash = await bcrypt.hash(password, 10);
     try {
+      /**
+       * RQ-148：注册时落库 IP 与 UA。
+       * 没有这两列，「≥5 名外部真实用户」只能靠口头声明——
+       * 而 v12 里 11 个用户中真实外部用户数正是不可知的（5 个 null 渠道、3 个 unknown）。
+       */
+      const ip = proxyClientIp(req);
+      const ua = String(req.headers?.['user-agent'] || '').slice(0, 300);
       const { rows } = await pool.query(
-        `INSERT INTO users (username, email, password_hash, cash, initial_capital, acquisition_channel)
-         VALUES ($1, $2, $3, $4, $4, $5)
-         RETURNING id, username, email, cash, initial_capital, acquisition_channel`,
-        [u, em, hash, INITIAL_CAPITAL, chan]
+        `INSERT INTO users (username, email, password_hash, cash, initial_capital, acquisition_channel, signup_ip, signup_ua)
+         VALUES ($1, $2, $3, $4, $4, $5, $6, $7)
+         RETURNING id, username, email, cash, initial_capital, acquisition_channel, signup_ip, signup_ua`,
+        [u, em, hash, INITIAL_CAPITAL, chan, ip ? String(ip).slice(0, 64) : null, ua || null]
       );
       const user = rows[0];
       const token = signToken(user.id);
       // 埋点只带渠道，不含任何身份信息（硬约束 5）
-      await track(user.id, 'signup', { channel: chan }).catch(() => {});
+      // RQ-143：注册是「一生一次」事件，去重后同一账号重复上报不会再进分母
+      await trackOnce(user.id, 'signup', { channel: chan }).catch(() => {});
       logger.info('注册成功', { userId: user.id, username: u, email: em, channel: chan, ip: req.ip });
       res.json({ token, user: userPayload(user) });
     } catch (e) {

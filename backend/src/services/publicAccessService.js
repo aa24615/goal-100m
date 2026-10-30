@@ -172,6 +172,139 @@ export function resolvePublicAccess(env = process.env, opts = {}) {
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * RQ-142 公网入口审计：把「.env / nginx / README 三处是否真的改了」       *
+ * 从口头确认变成可断言的状态                                            *
+ * ------------------------------------------------------------------ *
+ * 为什么必须单独做这一段：RQ-106/RQ-122/RQ-131 连续三版「未完成」，
+ * 而每一版的需求文档都写着「已完成」——因为没有人去读那三个文件，
+ * 大家读的是上一版需求文档里的结论。本段直接解析文件内容出 blocker，
+ * 让「未配置」这件事自己跳出来，而不是靠人记得去查。
+ */
+
+/** 解析 .env 文本（忽略注释与空行，剥离引号） */
+export function parseEnvText(text) {
+  const s = String(text ?? '');
+  const out = {};
+  for (const line of s.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const i = t.indexOf('=');
+    if (i <= 0) continue;
+    const k = t.slice(0, i).trim();
+    let v = t.slice(i + 1).trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    out[k] = v;
+  }
+  return out;
+}
+
+/** 抽取 nginx 配置里所有 server_name 的值 */
+export function serverNamesOf(nginxText) {
+  const s = String(nginxText ?? '');
+  const names = [];
+  for (const m of s.matchAll(/server_name\s+([^;]+);/g)) {
+    for (const part of m[1].trim().split(/\s+/)) {
+      if (!part || part === '_') continue;
+      names.push(part);
+    }
+  }
+  return names;
+}
+
+/** 是否存在「HTTP 一律 301 跳 HTTPS」 */
+export function hasHttpToHttpsRedirect(nginxText) {
+  const s = String(nginxText ?? '');
+  return /return\s+301\s+https:/i.test(s) || /rewrite\s+.*https:/i.test(s);
+}
+
+/** nginx 是否监听 443 ssl */
+export function listensSsl(nginxText) {
+  const s = String(nginxText ?? '');
+  return /listen\s+443\s+ssl/i.test(s);
+}
+
+/**
+ * 公网入口三处文件审计（纯函数）。
+ *
+ * @param {object} o
+ * @param {string} [o.envText]     .env 文件全文
+ * @param {string} [o.nginxText]   nginx 站点配置全文
+ * @param {string} [o.readmeText]  README 全文
+ * @param {boolean}[o.smoke]       手机非 Wi-Fi 实测是否通过（只能人工声明）
+ */
+export function auditPublicEntrypoint(o) {
+  const src = o && typeof o === 'object' ? o : {};
+  const env = parseEnvText(src.envText);
+  const nginx = String(src.nginxText ?? '');
+  const readme = String(src.readmeText ?? '');
+
+  const names = serverNamesOf(nginx);
+  const realNames = names.filter((n) => !isLocalHost(hostOf(n)));
+  const envUrl = trim(env.PUBLIC_BASE_URL || env.DOMAIN || env.PUBLIC_HOST || '');
+  const envHost = hostOf(envUrl);
+
+  const blockers = [];
+
+  if (!envUrl) {
+    blockers.push('RQ-142-a .env 未配置 PUBLIC_BASE_URL：部署后分享链接与回调地址无落点');
+  } else if (isLocalHost(envHost)) {
+    blockers.push(`RQ-142-a .env 的 PUBLIC_BASE_URL 指向本机/内网（${envHost}），外部无法访问`);
+  } else if (!String(envUrl).toLowerCase().startsWith('https://') && !/^https:\/\//i.test(`https://${envUrl}`)) {
+    blockers.push('RQ-142-a .env 的 PUBLIC_BASE_URL 未使用 https 协议');
+  }
+
+  if (!nginx.trim()) {
+    blockers.push('RQ-142-b 未提供 nginx 配置，无法确认 server_name 与 HTTPS');
+  } else {
+    if (realNames.length === 0) {
+      blockers.push('RQ-142-b nginx server_name 仍为 _（或未配置真实域名），HTTPS 证书无法签发');
+    }
+    if (!hasHttpToHttpsRedirect(nginx)) {
+      blockers.push('RQ-142-b nginx 未配置 HTTP 301 跳 HTTPS，公网入口存在明文可达');
+    }
+    if (!listensSsl(nginx)) {
+      blockers.push('RQ-142-b nginx 未监听 443 ssl');
+    }
+    if (envHost && realNames.length && !realNames.includes(envHost)) {
+      blockers.push(`RQ-142-b nginx server_name(${realNames.join(',')}) 与 .env 的域名(${envHost}) 不一致`);
+    }
+  }
+
+  // README 唯一入口：仍以 localhost 为入口时，所有人拿到的都是打不开的链接
+  const readmeLocal = /http:\/\/localhost|http:\/\/127\.0\.0\.1/.test(readme);
+  const readmeHasPublic = readme ? /https:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(readme) : false;
+  if (readme && !readmeHasPublic) {
+    blockers.push('RQ-142-c README 未写明公网地址，团队与外部拿到的仍是 localhost 链接');
+  }
+
+  const checklist = [
+    { key: 'env', label: '.env 配置了 https 的 PUBLIC_BASE_URL', done: Boolean(envUrl) && !isLocalHost(envHost) },
+    { key: 'server_name', label: 'nginx server_name 为真实域名', done: realNames.length > 0 },
+    { key: 'redirect', label: 'HTTP 一律 301 跳 HTTPS', done: hasHttpToHttpsRedirect(nginx) },
+    { key: 'ssl', label: '443 ssl 已启用', done: listensSsl(nginx) },
+    { key: 'readme', label: 'README 写明公网入口', done: readmeHasPublic },
+    { key: 'smoke', label: '手机非 Wi-Fi 网络实测可打开并完成一局', done: src.smoke === true },
+  ];
+
+  const ready = blockers.length === 0 && checklist.every((c) => c.done);
+
+  return {
+    ready,
+    publicUrl: envUrl ? normalizeBaseUrl(envUrl) : null,
+    host: envHost || realNames[0] || null,
+    serverNames: realNames,
+    readmeMentionsLocalhost: readmeLocal,
+    blockers,
+    checklist,
+    pending: checklist.filter((c) => !c.done).map((c) => c.label),
+    note: ready
+      ? '公网入口三处文件已一致，可以对外发出链接。'
+      : `公网入口不可达，${blockers.length} 项阻断；在此之前获客/留存/转化三项在物理上不可执行。`,
+    nextAction: blockers[0] || '用手机非 Wi-Fi 网络实测一次完整训练，并把结果标记为 smoke=true。',
+  };
+}
+
 /**
  * 生成 nginx 反代配置片段（RQ-106 的「反代与 server_name 配置落地」）。
  * 只产出文本，不写文件——部署动作留给运维，避免代码擅自改动生产配置。

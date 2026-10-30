@@ -2,6 +2,7 @@
 
 import express from 'express';
 import pool from '../db.js';
+import { logger } from '../logger.js';
 import { authMiddleware, optionalAuth } from '../auth.js';
 import { asyncHandler, parseIdParam, businessError } from '../middleware.js';
 import { identityOf, guestTokenFromRequest, guestQuota, normalizeGuestToken, GUEST_TODAY_SQL } from '../services/guestService.js';
@@ -26,8 +27,17 @@ import {
 } from '../services/blindService.js';
 import { buildPrescription } from '../services/checkupService.js';
 import { track } from '../services/analyticsService.js';
+import { trackOnce } from '../services/telemetryIntegrityService.js';
 import { buildScoreCard } from '../services/scoreCardService.js';
 import { buildSettlementSheet } from '../services/settlementService.js';
+import { buildSettlementAudit, settlementAuditCsv } from '../services/settlementAuditService.js';
+import { exportableSessions, trainingRecordsCsv, retentionNotice } from '../services/dataRetentionService.js';
+import { buildDualBaseline } from '../services/dualBaselineService.js';
+import {
+  evaluateEffectiveCompletion,
+  allowFinishTelemetry,
+  EFFECTIVE_RULES,
+} from '../services/effectiveCompletionService.js';
 import { planAccountSync, checkRuleParity, RULES_MANIFEST } from '../services/ruleParityService.js';
 import { buildReview } from '../services/reviewService.js';
 import { getSnapshot } from '../market.js';
@@ -63,7 +73,12 @@ async function guestUsedToday(token) {
   return rows[0]?.c || 0;
 }
 
-/** RQ-110 引导埋点：由调用方显式声明这是一次引导局，避免把直连 /blind 也算进引导路径 */
+/**
+ * RQ-110 引导埋点：由调用方显式声明这是一次引导局，避免把直连 /blind 也算进引导路径。
+ *
+ * RQ-147：finish 一步**先过有效完成门槛再发**。埋点一旦发出就进了分母，
+ * 事后清洗只能改数据库、改不了别人已经看到的数——所以在发送前拦。
+ */
 async function trackGuide(identity, step, extra = {}) {
   const map = {
     start: 'first_training_start',
@@ -72,7 +87,42 @@ async function trackGuide(identity, step, extra = {}) {
   };
   const ev = map[step];
   if (!ev || !identity.userId) return false;
-  return track(identity.userId, ev, extra);
+  return trackOnce(identity.userId, ev, extra, { guestToken: identity.guestToken });
+}
+
+/** RQ-147 引导结算埋点：未达有效完成门槛时改发 invalid 事件，保留可诊断性 */
+async function trackGuideFinish(identity, evaluation, extra = {}) {
+  if (!identity?.userId) return { sent: false };
+  const gate = allowFinishTelemetry(evaluation);
+  if (!gate.send) {
+    // 不发 first_training_finish，但发一条可诊断的事件，避免「埋点没了就不知道发生了什么」
+    await trackOnce(identity.userId, 'blind_finish', { ...extra, invalid: true, blockers: evaluation.blockerKeys })
+      .catch(() => {});
+    return { sent: false, reason: gate.reason, alternative: gate.alternative };
+  }
+  await trackOnce(identity.userId, 'first_training_finish', extra, { guestToken: identity.guestToken }).catch(() => {});
+  return { sent: true, reason: 'effective' };
+}
+
+/**
+ * RQ-147 把「有效完成」判定写回会话行。
+ *
+ * 为什么要落库而不是每次重算：`score` 是 JSONB，历史结构可能缺字段，
+ * 重算会把「真走了 5 分钟但 score 没写 durationSec」误判成空跑（v12 id=8 就是 0）。
+ * 落库后口径固定，也便于 RQ-148 的漏斗直接按 `effective_completed` 计数。
+ */
+async function persistEffective(sessionId, evaluation) {
+  try {
+    await pool.query(
+      `UPDATE blind_sessions
+          SET effective_completed = $2, effective_blockers = $3::jsonb
+        WHERE id = $1`,
+      [sessionId, evaluation.effective, JSON.stringify(evaluation.blockerKeys || [])]
+    );
+  } catch (e) {
+    // 判定本身不落库也要能出成绩：这里失败只记日志，不能让整局白跑
+    logger.warn('有效完成判定落库失败', { sessionId, err: e?.message || e });
+  }
 }
 
 /** RQ-82 片段类型字典 + RQ-81 可用粒度：页面据此渲染筛选项，不硬编码在前端 */
@@ -166,14 +216,15 @@ router.post(
       granularity: granularity || DEFAULT_GRANULARITY,
       preset: len.key,
     });
-    await track(req.userId ?? null, id.isGuest ? 'guest_training_start' : 'blind_start', {
+    // RQ-143：开训同一会话只记一条（此前 blind_start 与 blind_resume 数量级完全对不上）
+    await trackOnce(req.userId ?? null, id.isGuest ? 'guest_training_start' : 'blind_start', {
       sessionId: session.id,
       bars: session.end_seq - session.start_seq + 1,
       preset: len.key,
       guest: id.isGuest,
       tag: session.segment_tag || null,
       granularity: session.granularity || DEFAULT_GRANULARITY,
-    });
+    }, { guestToken: id.guestToken }).catch(() => {});
     if (req.body?.guide === true) await trackGuide(id, 'start', { sessionId: session.id, preset: len.key });
 
     // 训练中绝不返回 stock_code / stock_name，也不返回 seq（seq 可对回交易日历 → 日期）
@@ -206,6 +257,33 @@ router.get(
 );
 
 /**
+ * RQ-154 训练记录导出承诺（I-25）。
+ *
+ * 竞品 8 家无一明确保留期；FX Replay 免费档「1 周保留 / 50 笔」被测评定性为
+ * 「永远攒不到 100 笔样本」——保留期是隐性劝退点。因此导出必须真的能用，
+ * 而不是写在文案里：`?format=csv` 直接下载，列与页面逐行一致。
+ *
+ * 必须放在 `/blind/:id` 之前，否则会被当成 id=export 走 400 分支。
+ */
+router.get(
+  '/blind/export',
+  blindIdentity,
+  asyncHandler(async (req, res) => {
+    const list = await exportableSessions(req.blindIdentity, { limit: Number(req.query.limit) || 500 });
+    const notice = retentionNotice({
+      isGuest: Boolean(req.blindIdentity.isGuest),
+      sessionCount: list.length,
+    });
+    if (String(req.query.format || '').toLowerCase() === 'csv') {
+      res.setHeader('content-type', 'text/csv; charset=utf-8');
+      res.setHeader('content-disposition', 'attachment; filename="training-records.csv"');
+      return res.send(trainingRecordsCsv(list));
+    }
+    return res.json({ count: list.length, sessions: list, retention: notice });
+  })
+);
+
+/**
  * RQ-91 断点续做：返回最近一个未结束的会话 + 「上次停在第 N 根」提示。
  * 必须放在 `/blind/:id` 之前，否则会被当成 id=resume 走 400 分支（那正是 F-25 的噪声来源之一）。
  */
@@ -215,11 +293,13 @@ router.get(
   asyncHandler(async (req, res) => {
     const r = await resumeBlind(req.blindIdentity);
     if (r.resumable) {
-      await track(req.userId ?? null, 'blind_resume', {
+      // RQ-143：续做是会话级动作，同一会话只记一条。此前前端轮询导致
+      // 714 条 blind_resume / 仅 2 个用户（单分钟 228 条），漏斗彻底不可读。
+      await trackOnce(req.userId ?? null, 'blind_resume', {
         sessionId: r.session?.id ?? null,
         cursorIndex: r.hint?.cursorIndex ?? null,
         totalBars: r.hint?.totalBars ?? null,
-      });
+      }, { guestToken: req.blindIdentity.guestToken }).catch(() => {});
     }
     res.json(r);
   })
@@ -325,6 +405,112 @@ router.get(
       score: r.session?.score || null,
     });
     res.json(sheet);
+  })
+);
+
+/**
+ * RQ-150 结算口径说明书（I-22 / F-62 / F-78）。
+ *
+ * 与 `/blind/:id/settlement` 的分工：
+ *   - settlement 给**费用与对账**（已经有了）；
+ *   - settlement-audit 补三个验收必须回答的问题：
+ *       「为什么是这个价」（撮合价溯源到具体哪一根 K 线）、
+ *       「滑点多少」（如实写 0，不编造模型）、
+ *       「被拒绝的委托去哪了」（拒绝原因归类到规则条款 + 怎么核对 + 下一步）。
+ *
+ * 命名刻意避开「逐笔」二字（F-81）：竞品语境里的逐笔 = L2 行情明细，
+ * 我们给的是**结算口径说明书**，混用会让用户期待落空。
+ *
+ * `?format=csv` 返回与页面逐行一致的 CSV（含成交与拒绝两类）。
+ */
+router.get(
+  '/blind/:id/settlement/audit',
+  blindIdentity,
+  asyncHandler(async (req, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) throw businessError('训练 ID 无效', 400);
+    const r = await getBlindSession(req.blindIdentity, id);
+    if (!r) throw businessError('训练不存在', 404);
+
+    const finished = String(r.session?.status || '').toUpperCase() === 'FINISHED';
+
+    // 撮合价溯源需要真实收盘价；**未揭示一律不取**，避免把标的行情提前送出去（双盲红线）
+    let bars = [];
+    if (finished && r.session.stock_code) {
+      const { rows } = await pool.query(
+        `SELECT seq, close FROM stock_daily
+          WHERE code=$1 AND seq BETWEEN $2 AND $3 ORDER BY seq ASC`,
+        [r.session.stock_code, r.session.start_seq, r.session.end_seq]
+      );
+      bars = rows;
+    }
+
+    const { rows: orders } = await pool.query(
+      `SELECT seq, side, quantity, price, amount, fee, realized_pnl
+         FROM blind_orders WHERE session_id=$1 ORDER BY seq ASC, id ASC`,
+      [id]
+    );
+
+    // 被拒绝的委托：撮合层把原因写进了 blind_decisions.reason，这里按 REJECT 语义取
+    const { rows: rejections } = await pool.query(
+      `SELECT seq, side, quantity, reason
+         FROM blind_rejections WHERE session_id=$1 ORDER BY seq ASC, id ASC`,
+      [id]
+    ).catch(() => ({ rows: [] }));
+
+    const audit = buildSettlementAudit({
+      orders,
+      rejections,
+      bars,
+      session: r.session,
+      score: r.session?.score || null,
+      reveal: finished,
+    });
+
+    if (String(req.query.format || '').toLowerCase() === 'csv') {
+      res.setHeader('content-type', 'text/csv; charset=utf-8');
+      res.setHeader('content-disposition', `attachment; filename="settlement-audit-${id}.csv"`);
+      return res.send(settlementAuditCsv(audit));
+    }
+    return res.json(audit);
+  })
+);
+
+/**
+ * 双基准个人能力对照（RQ-137 / I-19，本期顺带接线消除 F-78 零引用）。
+ *
+ * 单基准（跑赢买入持有）回答不了「这段时间买什么都涨」，
+ * 因此同时给「闭眼随便挑一天进场」作运气基准；种子取会话 ID，刷新结论不变。
+ */
+router.get(
+  '/blind/:id/baseline',
+  blindIdentity,
+  asyncHandler(async (req, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) throw businessError('训练 ID 无效', 400);
+    const r = await getBlindSession(req.blindIdentity, id);
+    if (!r) throw businessError('训练不存在', 404);
+
+    const finished = String(r.session?.status || '').toUpperCase() === 'FINISHED';
+    let closes = [];
+    if (finished && r.session.stock_code) {
+      const { rows } = await pool.query(
+        `SELECT close FROM stock_daily
+          WHERE code=$1 AND seq BETWEEN $2 AND $3 ORDER BY seq ASC`,
+        [r.session.stock_code, r.session.start_seq, r.session.end_seq]
+      );
+      closes = rows.map((x) => x.close);
+    }
+
+    res.json(
+      buildDualBaseline({
+        closes,
+        returnPct: r.session?.score?.returnPct ?? null,
+        sampleSize: Number(req.query.sampleSize) || 0,
+        // 种子取会话 ID：同一局刷新永远得到同一个「随机」基准，这是可复核的前提
+        seed: Number(id) || 1,
+      })
+    );
   })
 );
 
@@ -475,17 +661,54 @@ router.post(
     if (id === null) throw businessError('训练 ID 无效', 400);
     const r = await finishBlind(req.blindIdentity, id);
     if (!r) throw businessError('训练不存在', 404);
-    await track(req.userId ?? null, req.blindIdentity.isGuest ? 'guest_training_finish' : 'blind_finish', {
+
+    /**
+     * RQ-147 有效完成判定：必须在出成绩卡**之前**算。
+     * 顺序反了就会先给用户一张 0 笔成交的成绩卡，再告诉他不算数。
+     */
+    const { rows: orderRows } = await pool.query(
+      'SELECT COUNT(*)::int AS c FROM blind_orders WHERE session_id=$1',
+      [id]
+    );
+    const evaluation = evaluateEffectiveCompletion({
+      session: r.session,
+      score: r.session.score || null,
+      orderCount: orderRows[0]?.c ?? null,
+    });
+    await persistEffective(id, evaluation);
+
+    // RQ-143：blind_finish 按会话去重 —— 埋点数必须等于 FINISHED 会话数（RQ-144 的验收式）
+    await trackOnce(req.userId ?? null, req.blindIdentity.isGuest ? 'guest_training_finish' : 'blind_finish', {
       sessionId: id,
       returnPct: r.session.score?.returnPct ?? null,
       disciplineRate: r.session.score?.disciplineRate ?? null,
-    });
-    if (req.body?.guide === true) await trackGuide(req.blindIdentity, 'finish', { sessionId: id });
+      effective: evaluation.effective,
+      tradeCount: evaluation.tradeCount,
+      durationSec: evaluation.durationSec,
+    }, { guestToken: req.blindIdentity.guestToken }).catch(() => {});
+
+    // RQ-147：未达有效完成门槛时不发 first_training_finish，北极星分子不再被空跑刷满
+    const guideTelemetry = req.body?.guide === true
+      ? await trackGuideFinish(req.blindIdentity, evaluation, { sessionId: id })
+      : { sent: false, reason: 'not-guide' };
+
     res.json({
       // RQ-109：完成 = 结算并出成绩卡。这里把 completed 与口径一起下发，
       // 避免前端再写一套「提交判断就算完成」的旧文案（F-32）。
       completed: isCompleted(r.session),
       completion: { definition: COMPLETION.definition, status: COMPLETION.sessionStatus },
+      // RQ-147：形式完成之外再给有效完成，前端据此决定出成绩卡还是出「再来一次」
+      effective: {
+        effective: evaluation.effective,
+        tradeCount: evaluation.tradeCount,
+        durationSec: evaluation.durationSec,
+        bars: evaluation.bars,
+        blockers: evaluation.blockers,
+        rules: EFFECTIVE_RULES,
+        scoreCard: evaluation.scoreCard,
+        note: evaluation.note,
+        guideTelemetry,
+      },
       session: toSessionDto(r.session),
       score: r.session.score,
       view: r.view,

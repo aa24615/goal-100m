@@ -179,6 +179,70 @@ cd backend && node src/scripts/verifyRelease.js --json
    返回 `ready: true`、`blockers: []` 才算具备公网可达性；`checklist` 给出逐项完成情况，
    `nextAction` 给出下一步该做什么。**localhost 与内网段一律判为不可对外**——防止自欺。
 
+5. **RQ-142 新增：三处文件一致性自检。**
+   前四版「未完成」的根因是没人去读那三个文件，大家读的是上一版需求文档里的结论。
+   现在发布前检查会直接解析 `.env` / `frontend/nginx.conf` / `README.md` 并列出缺项：
+
+   ```bash
+   npm run release:check     # 输出 [WARN] public-entrypoint: 公网入口未就绪（缺哪几项）
+   ```
+
+   判定项：`.env` 是否配了 https 的 `PUBLIC_BASE_URL`、nginx `server_name` 是否仍为 `_`、
+   是否配置了 HTTP 301 跳 HTTPS、是否监听 443 ssl、README 是否写明公网地址。
+
+6. **RQ-145 新增：双远端同步校验。**
+   `git push origin main` 会同时推送 GitHub 与 CNB，但任一侧失败都会留下「一份提交只在一个远端」。
+   发布前检查新增 `remote-parity` 项，两个远端 HEAD 不同哈希即阻断发布。
+
+## 结算口径说明书（RQ-150 / RQ-151）
+
+> 模拟盘最容易被怀疑的是「这个成交价是不是假的」。一旦怀疑成立，训练价值归零。
+> 因此每一笔成交都摊开可核对，而不是让用户选择相信我们。
+
+**注意命名**：这里的「结算口径说明书」**不是** L2 行情的「逐笔成交明细」。
+竞品语境里的逐笔 = 逐笔委托/成交盘口，我们给的是「这一笔模拟成交的价和费怎么算出来的」。
+
+三处入口（RQ-151，此前只在成绩区里，用户找不到 → F-82）：
+
+| 位置 | 入口 |
+|---|---|
+| 训练页 `/training` | 「结算口径说明书」卡片，直接跳最近一局 |
+| 复盘页 `/review` | 同卡片（紧凑模式） |
+| 训练成绩区 `/blind` | 完整面板：逐笔展开 + 拒绝归类 + CSV 导出 |
+
+每一笔成交可展开回答三个问题（RQ-150）：
+
+1. **为什么是这个价？** —— 撮合价 = 该根已揭示 K 线的收盘价，指认到具体第几根；出现偏离即标红。
+2. **扣了多少费？** —— 佣金 / 印花税 / 过户费逐项，最低佣金是否触发，并与按公开费率重算的结果比对。
+3. **为什么被拒？** —— 被拒绝的委托归类到规则条款（T+1 / 涨跌停 / 整手 / 资金不足…），
+   给出「怎么自己核对」与「下一步怎么做」。
+
+与真实规则的差异清单（≥5 条）可一键复制，也可导出 CSV（含成交与拒绝两类）。
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/blind/1/settlement/audit
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8080/api/blind/1/settlement/audit?format=csv"
+```
+
+自检三项（`audit.priceMismatch` / `feeMismatch` / `unknownRejections`）全为 0 时，
+本局才可声称「逐笔可核对」；任何一项不为 0 都会在页面上说出来，而不是藏进日志。
+
+## 数据保留期承诺（RQ-154）
+
+| 身份 | 保留期 |
+|---|---|
+| 登录用户 | **永久保留**（训练记录、成绩卡、结算明细不会因时间自动删除） |
+| 游客 | **7 天**，第 5 天起在训练页与注册页提醒转登录 |
+
+训练记录可随时导出为 CSV（含「有效完成」列，能区分空跑与真实训练）：
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8080/api/blind/export?format=csv"
+```
+
+竞品 8 家无一明确保留期；保留期短是隐性劝退点（用户不敢投入三个月）。因此这条承诺写在
+**用户投入之前**（注册页与训练页均可见），而不是藏在条款里。
+
 ## 快速开始（Docker）
 
 > 需已安装 Docker 与 Docker Compose。

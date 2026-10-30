@@ -50,6 +50,9 @@ import {
   getChallengeBoard,
   getPublicAccess,
   trackEvent,
+  listBlind,
+  getConclusion,
+  getRetentionNotice,
 } from '../api';
 import type {
   BlindResume,
@@ -64,12 +67,17 @@ import type {
   ChallengeBoardPayload,
   PublicAccessPayload,
   PresetsPayload,
+  ConclusionPayload,
+  RetentionPayload,
 } from '../types';
 import FirstTrainingCard from '../components/FirstTrainingCard';
 import SmallSampleFacts from '../components/SmallSampleFacts';
 import DailyChallengeCard from '../components/DailyChallengeCard';
 import TierProgressCard from '../components/TierProgressCard';
 import Disclaimer from '../components/Disclaimer';
+import SettlementEntryCard from '../components/SettlementEntryCard';
+import IntervalConclusion from '../components/IntervalConclusion';
+import RetentionNoticeCard from '../components/RetentionNoticeCard';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { RATIO_GUARD_THRESHOLD, RESUME_HINT_PREFIX, GUIDE_EVENTS } from '../constants';
 
@@ -273,6 +281,11 @@ export default function Training() {
   const [today, setToday] = useState<TodayChallengePayload | null>(null);
   const [board, setBoard] = useState<ChallengeBoardPayload | null>(null);
   const [pub, setPub] = useState<PublicAccessPayload | null>(null);
+  // v12 新增：RQ-151 结算入口（训练页也要能进） / RQ-152-153 区间化结论
+  const [lastFinishedId, setLastFinishedId] = useState<number | null>(null);
+  const [conclusion, setConclusion] = useState<ConclusionPayload | null>(null);
+  // 注意：上面已有一个 `retention`（7 日留存看板，RQ-62），这里不能再同名
+  const [retentionPolicy, setRetentionPolicy] = useState<RetentionPayload | null>(null);
 
   const loadBase = useCallback(async () => {
     const [r, n, c, p, g, sm, tp, tc, cb, pa] = await Promise.all([
@@ -297,6 +310,16 @@ export default function Training() {
     setToday((tc.data as TodayChallengePayload) || null);
     setBoard((cb.data as ChallengeBoardPayload) || null);
     setPub((pa.data as PublicAccessPayload) || null);
+    // RQ-151：训练页也要能进结算说明书，否则「已上线但找不到」（F-82）
+    const hist = await listBlind(10).catch(() => ({ data: [] as { id: number; status: string }[] }));
+    const done = (hist.data || []).find((s) => s && s.status === 'FINISHED');
+    setLastFinishedId(done ? done.id : null);
+    // RQ-152/153：结论一律带区间；样本不足时只给「能说的三件事」
+    const cc = await getConclusion().catch(() => ({ data: null }));
+    setConclusion((cc.data as ConclusionPayload) || null);
+    // RQ-154：保留期承诺要写在用户投入之前，而不是藏在条款里
+    const rn = await getRetentionNotice().catch(() => ({ data: null }));
+    setRetentionPolicy((rn.data as RetentionPayload) || null);
   }, [dismissed]);
 
   const loadInbox = useCallback(async (off: string[]) => {
@@ -469,6 +492,15 @@ export default function Training() {
                 <NorthStarPanel data={north} />
                 {/* RQ-111 小样本补位：空页面用「能确定的三件事」填，而不是塞伪结论 */}
                 <SmallSampleFacts data={small} onAction={(p) => navigate(p)} />
+                {/* RQ-152 / RQ-153 区间化结论：小样本给三件事，样本足够给区间与达标线 */}
+                <IntervalConclusion data={conclusion} />
+                {/* RQ-151 结算入口扩面：训练页也能进，不只成绩区 */}
+                <SettlementEntryCard
+                  lastFinishedId={lastFinishedId}
+                  onOpen={(id) => navigate(`/blind?session=${id}`)}
+                />
+                {/* RQ-154 保留期承诺：训练页可见（注册页同样挂载） */}
+                <RetentionNoticeCard data={retentionPolicy} onRegister={() => navigate('/register')} />
                 {/* RQ-117 达标进度：护栏从拦截改为牵引 */}
                 <TierProgressCard
                   data={tier}

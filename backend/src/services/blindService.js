@@ -908,6 +908,24 @@ export async function finishBlind(userId, sessionId) {
   return getBlindSession(userId, s.id, { reveal: true });
 }
 
+/**
+ * RQ-150：拒绝原因落库。
+ * 此前撮合被拒时只是 throw 一个 400，原因**没有任何地方留存** ——
+ * 用户只看到一句「交易失败」，既不知道违反了哪条规则，也没法自己核对。
+ * 落库后结算口径说明书才能把拒绝归类到规则条款，并给出「怎么核对 / 下一步」。
+ *
+ * 落库失败绝不能影响主流程：记不下原因也要照常拒绝这笔委托，因此全程吞异常。
+ */
+async function recordRejection(s, side, quantity, reason) {
+  await pool
+    .query(
+      `INSERT INTO blind_rejections (session_id, seq, side, quantity, price, reason)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [s.id, s.cursor_seq, String(side || '').toUpperCase() || 'UNKNOWN', Number(quantity) || 0, null, String(reason || '未给出原因')]
+    )
+    .catch(() => {});
+}
+
 /** 在盲测片段内下单（只写 blind_orders，绝不触碰真实账户，RQ-42） */
 export async function tradeInBlind({ userId, guestToken = null, sessionId, side, quantity }) {
   const own = identityOf({ userId, guestToken });
@@ -918,9 +936,20 @@ export async function tradeInBlind({ userId, guestToken = null, sessionId, side,
   if (s.status === 'FINISHED') throw blindError('该训练已结束', 400);
   const sd = String(side || '').toUpperCase();
   const q = Number(quantity);
-  if (!['BUY', 'SELL'].includes(sd)) throw blindError('方向错误', 400);
-  if (!Number.isInteger(q) || q <= 0) throw blindError('数量需为正整数', 400);
-  if (q % 100 !== 0) throw blindError('委托数量需为 100 的整数倍', 400);
+  // 参数校验阶段的拒绝同样要留痕：整手、数量这类规则恰恰是用户最常踩的，
+  // 只让它们变成一句 400 就等于没教用户任何东西（RQ-150）。
+  if (!['BUY', 'SELL'].includes(sd)) {
+    await recordRejection(s, sd, quantity, '方向错误：只接受买入或卖出');
+    throw blindError('方向错误', 400);
+  }
+  if (!Number.isInteger(q) || q <= 0) {
+    await recordRejection(s, sd, quantity, '数量需为正整数');
+    throw blindError('数量需为正整数', 400);
+  }
+  if (q % 100 !== 0) {
+    await recordRejection(s, sd, q, '委托数量需为 100 的整数倍');
+    throw blindError('委托数量需为 100 的整数倍', 400);
+  }
 
   const bars = await loadBars(s.start_seq, s.end_seq, s.stock_code);
   const orders = await loadOrders(s.id);
@@ -932,7 +961,11 @@ export async function tradeInBlind({ userId, guestToken = null, sessionId, side,
     stockMeta: await loadMeta([s.stock_code]),
   });
   const rej = trial.rejected.filter((r) => r.seq === s.cursor_seq);
-  if (rej.length > 0) throw blindError(rej[rej.length - 1].reason, 400);
+  if (rej.length > 0) {
+    const last = rej[rej.length - 1];
+    await recordRejection(s, sd, q, last.reason);
+    throw blindError(last.reason, 400);
+  }
 
   const exec = trial.trades.filter((t) => t.seq === s.cursor_seq).pop();
   const bar = bars.find((b) => b.seq === s.cursor_seq);

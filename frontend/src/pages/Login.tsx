@@ -1,7 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Card, Tabs, Form, Input, Button, Typography, App, Divider } from 'antd';
 import { useAuth } from '../auth';
 import Forgot from './Forgot';
+import RetentionNoticeCard from '../components/RetentionNoticeCard';
+import { getRetentionNotice } from '../api';
+import type { RetentionPayload } from '../types';
 // RQ-51/RQ-72：口径统一取自常量，页面不再写字面量（否则三处必然再度漂移）
 import { DATA_SOURCE_STATEMENT } from '../constants';
 
@@ -15,6 +18,14 @@ export default function Login() {
   const [registerLoading, setRegisterLoading] = useState(false);
   // RQ-30：密码找回入口（此前忘记密码只能弃号重开）
   const [forgot, setForgot] = useState(false);
+  // RQ-154 保留期承诺：注册页必须可见，文案一律取自后端，前端不复制常量
+  const [retention, setRetention] = useState<RetentionPayload | null>(null);
+
+  useEffect(() => {
+    getRetentionNotice()
+      .then((r) => setRetention(r.data || null))
+      .catch(() => setRetention(null));
+  }, []);
 
   if (forgot) return <Forgot />;
 
@@ -223,6 +234,10 @@ export default function Login() {
                       >
                         <Input.Password size="large" placeholder="再次输入密码" />
                       </Form.Item>
+                      {/* RQ-154 保留期承诺：写在用户投入之前（注册页必须可见） */}
+                      <div style={{ marginBottom: 12 }}>
+                        <RetentionNoticeCard data={retention} />
+                      </div>
                       <Button type="primary" htmlType="submit" block size="large" loading={registerLoading}>
                         注册并领取模拟金
                       </Button>

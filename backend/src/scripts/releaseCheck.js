@@ -12,6 +12,8 @@
  *   4. dist 不落后于 src（改了源码但没重新 build，是本次价值黑洞的直接成因）
  *   5. 迁移文件数 ≤ 已应用迁移数（可选，需要 DATABASE_URL）
  *   6. README 写明发布三步顺序（流程留痕，硬约束 2）
+ *   7. RQ-145 双远端同步：origin 与 github 的 HEAD 必须同哈希
+ *   8. RQ-142 公网入口三处文件一致（.env / nginx / README，警告项不阻断）
  *
  * 用法：node src/scripts/releaseCheck.js [--json] [--skip-db]
  */
@@ -20,6 +22,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { auditPublicEntrypoint } from '../services/publicAccessService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** backend/src/scripts → 仓库根 */
@@ -175,6 +178,88 @@ export async function checkMigrations({ skipDb = false } = {}) {
   }
 }
 
+/**
+ * 7. RQ-145 双远端同步校验：全部远端的 HEAD 必须同哈希。
+ *
+ * 与 checkPushed 的区别（两者都要有）：
+ *   - checkPushed 比对「本地 HEAD vs 各远端 HEAD」→ 防「没推上去」；
+ *   - 本项比对「远端 A vs 远端 B」→ 防「只推了一个远端」。
+ * v12 事实 12：`origin/main = 52ca4d3` 而 `github/main = 11d2df2`，
+ * 前者会通过 checkPushed（因为本地就是 52ca4d3 且 origin 也是），
+ * 但 GitHub 侧永久少一个提交——任一远端丢掉就等于丢提交。
+ */
+export function checkRemoteParity(remotes = null) {
+  const list = Array.isArray(remotes) && remotes.length
+    ? remotes
+    : (git(['remote']) || '')
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+  if (list.length < 2) {
+    return { name: 'remote-parity', ok: true, warn: true, detail: `仅 ${list.length} 个远端，无需跨远端比对` };
+  }
+
+  const heads = [];
+  for (const r of list) {
+    const h = (git(['ls-remote', r, 'HEAD']) || '').split('\n')[0]?.split(/\s+/)[0]?.trim();
+    heads.push({ remote: r, head: h || null });
+  }
+
+  const reachable = heads.filter((h) => h.head);
+  if (reachable.length < 2) {
+    return {
+      name: 'remote-parity',
+      ok: true,
+      warn: true,
+      detail: `可访问远端不足 2 个（${heads.map((h) => `${h.remote}:${h.head ? 'ok' : '不可访问'}`).join(', ')}），跳过跨远端比对`,
+      heads,
+    };
+  }
+
+  const first = reachable[0].head;
+  const diverged = reachable.filter((h) => h.head !== first);
+  if (diverged.length) {
+    return {
+      name: 'remote-parity',
+      ok: false,
+      detail:
+        `远端 HEAD 不一致：${reachable.map((h) => `${h.remote}=${h.head.slice(0, 8)}`).join(' | ')}。请对落后的远端执行 git push <remote> HEAD:main`,
+      heads,
+    };
+  }
+  return {
+    name: 'remote-parity',
+    ok: true,
+    detail: `${reachable.length} 个远端 HEAD 一致（${first.slice(0, 8)}）`,
+    heads,
+  };
+}
+
+/**
+ * 8. RQ-142 公网入口三处文件一致（.env / nginx / README）。
+ *
+ * 这一项**阻断发布**是不合适的（公网入口没配好不代表不能发内部版本），
+ * 因此做成警告项：未完成会显著提示，但不拦截。真正把它变成硬阻断的是 RQ-148 的验收。
+ */
+export function checkPublicEntrypoint({ readFn = readFileSync, existsFn = existsSync } = {}) {
+  const read = (p) => (existsFn(p) ? readFn(p, 'utf8') : '');
+  const envText = read(join(REPO_ROOT, 'backend', '.env'));
+  const nginxText = read(join(REPO_ROOT, 'frontend', 'nginx.conf'));
+  const readmeText = read(join(REPO_ROOT, 'README.md'));
+
+  const audit = auditPublicEntrypoint({ envText, nginxText, readmeText });
+  return {
+    name: 'public-entrypoint',
+    ok: true,
+    warn: !audit.ready,
+    detail: audit.ready
+      ? `公网入口就绪：${audit.publicUrl}`
+      : `公网入口未就绪（警告，不阻断）：${audit.blockers.join('；')}`,
+    audit,
+  };
+}
+
 /** 6. README 写明发布三步顺序（硬约束 2 的流程留痕） */
 export function checkReadmeReleaseDoc() {
   const p = join(REPO_ROOT, 'README.md');
@@ -199,10 +284,14 @@ export async function runChecks({ skipDb = false } = {}) {
   const results = [
     checkGitClean(),
     checkPushed(),
+    // RQ-145：本地推了还不够，两个远端必须同哈希，否则任一远端丢失即丢提交
+    checkRemoteParity(),
     checkDistAssets(),
     checkDistFreshness(),
     await checkMigrations({ skipDb }),
     checkReadmeReleaseDoc(),
+    // RQ-142：公网入口三处文件是否一致（警告项，不阻断内部发布）
+    checkPublicEntrypoint(),
   ];
   const failed = results.filter((r) => !r.ok);
   const warned = results.filter((r) => r.ok && r.warn);
