@@ -12,7 +12,7 @@ import pool from '../db.js';
 import { logger } from '../logger.js';
 import { calcFees } from '../fees.js';
 import { priceLimitOf } from '../rules.js';
-import { clampLimit } from '../utils/num.js';
+import { clampLimit, clampMoney } from '../utils/num.js';
 
 const DEFAULT_CAPITAL = 1000000;
 const MAX_RANGE_BARS = 400; // 单次回放最多允许的 bar 数，防止超大数据量拖垮查询（RK-03）
@@ -416,7 +416,11 @@ export async function startSession({ userId, startSeq, endSeq, capital }) {
     throw replayError(`单次回放最多 ${MAX_RANGE_BARS} 个交易日`, 400);
   }
 
-  const init = Number(capital) > 0 ? Number(capital) : DEFAULT_CAPITAL;
+  // clampMoney 而非 `Number(capital) > 0`：后者只判「是不是正数」，
+  // initial_capital 是 numeric(18,2)，1e20 / Infinity 这类数学上合法的正数
+  // 会让它抛 22003「numeric field overflow」并被 errorHandler 兜成 500。
+  // 口径与既有非法入参一致：非法值回落默认初始资金，合法值原样保留。
+  const init = clampMoney(capital, DEFAULT_CAPITAL);
   const { rows } = await pool.query(
     `INSERT INTO replay_sessions (user_id, start_seq, end_seq, cursor_seq, initial_capital)
      VALUES ($1,$2,$3,$4,$5) RETURNING *`,

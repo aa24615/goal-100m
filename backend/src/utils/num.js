@@ -53,3 +53,38 @@ export const INT32_MAX = 2147483647;
 export function isDbInt(v) {
   return Number.isSafeInteger(v) && v >= -INT32_MAX && v <= INT32_MAX;
 }
+
+/**
+ * PostgreSQL `numeric(p, s)` 列能表示的最大值。
+ *
+ * 与 int4/int8 越界同理，金额列也有一类容易被忽略的越界：`numeric(18,2)`
+ * 最多 16 位整数 + 2 位小数。而代码里的写法往往是 `Number(x) > 0 ? Number(x) : DEFAULT`
+ * ——它只判「是不是正数」，不判上界，于是 `1e20`、`Infinity` 这类**数学上合法的正数**
+ * 会原样下发 SQL，PostgreSQL 抛 **22003「numeric field overflow」**并被 errorHandler
+ * 兜成 500。
+ * 实测复现：`POST /api/replay/start` 携带 `capital=1e20`（其余参数合法）。
+ */
+export const MAX_MONEY_18_2 = 9999999999999999.99; // numeric(18,2)
+export const MAX_MONEY_12_2 = 9999999999.99; // numeric(12,2)，用于价格类列
+
+/**
+ * 判断一个值能否安全地写进 PostgreSQL `numeric(p, s)` 金额列。
+ *
+ * 与 `clampInt` 的分工同 `isDbInt`：金额列同样只判正负是不够的，
+ * 必须同时是**有限数**——`Infinity` 满足 `> 0` 却无法写入任何 numeric 列。
+ */
+export function isDbMoney(v, max = MAX_MONEY_18_2) {
+  return Number.isFinite(v) && v > 0 && v <= max;
+}
+
+/**
+ * 金额收敛：合法则原样返回，非法一律回落 fallback。
+ *
+ * 沿用项目既有的「非法入参回落默认值」口径（与 `Number(x) || fallback`
+ * 对 abc/NaN/0/负数的行为一致），保证**合法输入的结果零变化**：
+ * 不做四舍五入，精度处理仍交给 PostgreSQL，避免 JS 与 PG 的舍入差异。
+ */
+export function clampMoney(raw, fallback, max = MAX_MONEY_18_2) {
+  const n = Number(raw);
+  return isDbMoney(n, max) ? n : fallback;
+}
