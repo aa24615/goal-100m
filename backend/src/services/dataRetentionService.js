@@ -17,6 +17,7 @@
  */
 
 import pool from '../db.js';
+import { clampLimit } from '../utils/num.js';
 
 /** 保留期承诺（唯一事实来源，页面与接口共用） */
 export const RETENTION_POLICY = {
@@ -170,7 +171,10 @@ export function trainingRecordsCsv(sessions = []) {
 export async function exportableSessions(identity, { limit = 500, queryFn = null } = {}) {
   const q = queryFn || ((sql, params) => pool.query(sql, params));
   const id = identity && typeof identity === 'object' ? identity : {};
-  const lim = Math.min(2000, Math.max(1, Number(limit) || 500));
+  // 必须取整后再夹：SQL 的 LIMIT 只接受整数，`Math.min(2000, Math.max(1, 1.5))` 得到 1.5，
+  // 下发后 PostgreSQL 抛 22P02「invalid input syntax for type bigint: "1.5"」并被兜成 500。
+  // 实测复现：`GET /api/blind/export?limit=1.5`。clampLimit 内部已含 Math.floor。
+  const lim = clampLimit(limit, 2000, 500);
 
   if (id.userId != null) {
     const { rows } = await q(

@@ -22,6 +22,7 @@
 
 import pool from '../db.js';
 import { logger } from '../logger.js';
+import { clampInt } from '../utils/num.js';
 
 /* ------------------------------------------------------------------ *
  * 一、去重维度                                                        *
@@ -392,7 +393,8 @@ export async function scanDuplicates({ days = 30, top = 10, queryFn = null } = {
      HAVING COUNT(*) > 1
       ORDER BY cnt DESC
       LIMIT $2`,
-    [String(d), Math.min(200, Math.max(1, Number(top) || 10))]
+    // 同 clampLimit 的理由：LIMIT 只接受整数，1.5 会触发 22P02 并被兜成 500。
+    [String(d), clampInt(top, 1, 200, 10)]
   );
   return { days: d, ...summarizeDuplicates(rows, { top }) };
 }
@@ -418,7 +420,10 @@ export async function purgeDuplicates({ dryRun = true, batch = 5000, queryFn = n
     return { dryRun, removable, deleted: 0, note: dryRun ? '未执行删除（dryRun 默认开启）' : '无重复记录可清理' };
   }
 
-  const limit = Math.min(50000, Math.max(1, Number(batch) || 5000));
+  // batch 经 `POST /api/analytics/integrity/purge?batch=` 外部可控，且本值直接进 `LIMIT $1`。
+  // 只夹不整会让 batch=1.5 触发 22P02 并被兜成 500（当前库内无重复 dedupe_key，
+  // 该分支尚未被执行，属潜伏缺陷，一旦出现重复即复现）。
+  const limit = clampInt(batch, 1, 50000, 5000);
   const { rowCount } = await q(
     `DELETE FROM analytics_events WHERE id IN (
        SELECT id FROM (

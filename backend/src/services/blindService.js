@@ -13,7 +13,7 @@
 import pool from '../db.js';
 import { logger } from '../logger.js';
 import { simulateReplay } from './replayService.js';
-import { clampLimit, isDbInt } from '../utils/num.js';
+import { clampLimit, isDbInt, isDbMoney, MAX_MONEY_12_2 } from '../utils/num.js';
 import { buildCheckup, buildPrescription, disciplineRate, SAMPLE_THRESHOLD } from './checkupService.js';
 import { round2, pct2 } from '../utils/time.js';
 import { identityOf } from './guestService.js';
@@ -763,6 +763,26 @@ function toResumeDto(s) {
  * 刷新会话活跃时间（推进 / 决策 / 下单都会调用）。
  * 「上次停在第 N 根」要准，靠的就是这个时间戳而不是 created_at。
  */
+/**
+ * 计划止损归一化（纯函数，便于单测锁定边界）。
+ *
+ * `blind_decisions.stop_plan` 是 `numeric(12,2)`，上界 9999999999.99。
+ * 原写法 `Number.isFinite(stop) && stop > 0` **只判正数不判上界**，而
+ * `Number.isFinite(1e20) && 1e20 > 0` 成立 —— 1e20、99999999999999999999 这类
+ * 数学上合法的正数会原样下发 SQL，PostgreSQL 抛 22003「numeric field overflow」
+ * 并被 errorHandler 兜成 **500 + 一条 ERROR 日志**。
+ * 实测复现：`POST /api/blind/:id/decision` 携带 `stopPlan=1e20`。
+ *
+ * 沿用既有「非法入参回落」口径：非法值一律返回 null（等价于「没写止损」），
+ * 合法值原样返回，因此合法请求的结果零变化。
+ *
+ * @returns {number|null} 可安全写入 `numeric(12,2)` 的值，或 null
+ */
+export function normalizeStopPlan(raw) {
+  const n = Number(raw);
+  return isDbMoney(n, MAX_MONEY_12_2) ? n : null;
+}
+
 async function touchSession(sessionId) {
   await pool.query('UPDATE blind_sessions SET last_active_at=now() WHERE id=$1', [sessionId]);
 }
@@ -785,9 +805,7 @@ export async function recordDecision({ userId, guestToken = null, sessionId, act
   const text = typeof reason === 'string' ? reason.trim() : '';
   const isSkipped = Boolean(skipped) || text.length === 0;
 
-  // 计划止损必须为正数且不超过合理区间，否则与「没写」等价
-  let stop = Number(stopPlan);
-  if (!Number.isFinite(stop) || stop <= 0) stop = null;
+  const stop = normalizeStopPlan(stopPlan);
 
   const { rows: ins } = await pool.query(
     `INSERT INTO blind_decisions (session_id, seq, action, reason, stop_plan, skipped)
