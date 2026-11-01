@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
 import { INT32_MAX } from './utils/num.js';
+import { sanitizeDeep } from './utils/text.js';
 
 /**
  * HTTP 层日志中间件
@@ -193,4 +194,27 @@ export function asyncHandler(fn) {
 export function parseIdParam(raw) {
   const n = Number(raw);
   return Number.isSafeInteger(n) && n > 0 && n <= INT32_MAX ? n : null;
+}
+
+/**
+ * 文本入参清洗中间件：剥掉 body / query / params 里的 U+0000。
+ *
+ * 为什么要这一层（2026-11-02 日志分析）：PostgreSQL 的 text/varchar/jsonb
+ * **不接受 U+0000**，客户端在自由文本里带一个 NUL 就会抛
+ * `22021 invalid byte sequence for encoding "UTF8": 0x00` 并被兜成 500。
+ * 实测稳定复现路径：`POST /api/blind/:id/decision`（reason）、
+ * `POST /api/watchlist`（note）、`POST /api/analytics/error`（message）。
+ *
+ * 与 `parseIdParam` 的定位一致 —— 都是「入参在进 SQL 之前先收敛到数据库能接受
+ * 的形状」。区别只是它守数值、这里守文本。放在入口做一次，新增接口天然免疫，
+ * 不用在每个服务层逐个补（逐个补必漏，这是一族缺陷而不是一个点）。
+ *
+ * 只清 U+0000：实测 U+0007 / U+007F / 游离代理项 / 10 万字符文本 PG 均正常接受，
+ * 清洗面收窄到最小集合，才不会误伤合法输入。
+ */
+export function sanitizeTextInput(req, _res, next) {
+  sanitizeDeep(req.body);
+  sanitizeDeep(req.query);
+  sanitizeDeep(req.params);
+  next();
 }

@@ -30,7 +30,7 @@ import { seedScenarios } from './services/scenarioService.js';
 import { startSnapshots } from './snapshots.js';
 import { runMigrations } from './migrate.js';
 import { logger, installProcessGuards, onShutdown } from './logger.js';
-import { requestLogger, notFoundHandler, errorHandler, proxyClientIp } from './middleware.js';
+import { requestLogger, notFoundHandler, errorHandler, proxyClientIp, sanitizeTextInput } from './middleware.js';
 
 installProcessGuards();
 
@@ -61,6 +61,8 @@ export function createApp() {
     })
   );
   app.use(express.json());
+  // 必须在业务路由之前：正文里的 U+0000 会在 SQL 层抛 22021 并被兜成 500
+  app.use(sanitizeTextInput);
   app.use(requestLogger);
 
   // 限流：注册/登录按 IP 限制，交易接口按用户更频繁但仍有上限
