@@ -14,6 +14,7 @@
  *   6. README 写明发布三步顺序（流程留痕，硬约束 2）
  *   7. RQ-145 双远端同步：origin 与 github 的 HEAD 必须同哈希
  *   8. RQ-142 公网入口三处文件一致（.env / nginx / README，警告项不阻断）
+ *   9. RQ-160 公网入口责任人：owner + 截止日，缺失或逾期即阻断
  *
  * 用法：node src/scripts/releaseCheck.js [--json] [--skip-db]
  */
@@ -23,6 +24,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { auditPublicEntrypoint } from '../services/publicAccessService.js';
+import { ownerState } from '../services/publicEntryService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** backend/src/scripts → 仓库根 */
@@ -238,6 +240,7 @@ export function checkRemoteParity(remotes = null) {
 
 /**
  * 8. RQ-142 公网入口三处文件一致（.env / nginx / README）。
+ * 9. RQ-160 公网入口责任人（owner + 截止日）。
  *
  * 这一项**阻断发布**是不合适的（公网入口没配好不代表不能发内部版本），
  * 因此做成警告项：未完成会显著提示，但不拦截。真正把它变成硬阻断的是 RQ-148 的验收。
@@ -278,6 +281,70 @@ export function checkReadmeReleaseDoc() {
   return { name: 'readme-release', ok: true, detail: 'README 已写明「提交 → 推送 → 构建部署」三步顺序' };
 }
 
+/**
+ * 9. RQ-160 公网入口责任人：必须有 owner + 截止日，且不得逾期。
+ *
+ * 为什么这一项不能像 RQ-142 那样只给警告：**连续四版未完成的根因是没有 owner**，
+ * 而「没有 owner」恰恰是最容易被忽略的一项——它不会产生任何报错，只会在下一版
+ * 需求评审时以「这个需求好像一直没做完」的形式再次出现。
+ *
+ * 另外补一个真实_bug：上一版 `checkPublicEntrypoint` 只读 `backend/.env`，
+ * 而本项目的 `.env` 实际在**仓库根目录**，等于这一项永远读到空文件。
+ * 两个位置都读（root 优先，backend 其次），且要把「读的是哪个文件」说出来。
+ */
+export function checkPublicOwner({ readFn = readFileSync, existsFn = existsSync, now = new Date() } = {}) {
+  const candidates = [join(REPO_ROOT, '.env'), join(REPO_ROOT, 'backend', '.env')];
+  const readmePath = join(REPO_ROOT, 'README.md');
+  const hits = [];
+  let envText = '';
+  for (const p of candidates) {
+    if (!existsFn(p)) continue;
+    try {
+      const t = readFn(p, 'utf8');
+      hits.push(p);
+      envText += `${t}\n`;
+    } catch {
+      /* 读不到就当没有 */
+    }
+  }
+  const readmeText = existsFn(readmePath) ? readFn(readmePath, 'utf8') : '';
+  const env = Object.fromEntries(
+    envText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#') && l.includes('='))
+      .map((l) => {
+        const i = l.indexOf('=');
+        return [l.slice(0, i).trim(), l.slice(i + 1).trim().replace(/^["']|["']$/g, '')];
+      })
+  );
+
+  const own = ownerState({ owner: env.PUBLIC_ENTRY_OWNER, deadline: env.PUBLIC_ENTRY_DEADLINE, now });
+  // README 里写了 owner 也算数——但必须是同一份事实：README 与 .env 不一致时以 .env 为准
+  // 表格写法是 `| 责任人（RQ-160） | \`张三\` |`，管道符两侧都有空格，正则必须允许
+  const readmeMentionsOwner = /责任人（RQ-160）\s*\|\s*`[^`]+`/.test(readmeText);
+
+  if (own.state === 'none') {
+    return {
+      name: 'public-owner',
+      ok: false,
+      detail: `未指定公网入口责任人：请在 .env 写入 PUBLIC_ENTRY_OWNER 与 PUBLIC_ENTRY_DEADLINE（可用 node src/scripts/provisionPublicEntry.js --owner=xx --deadline=YYYY-MM-DD --apply 一条命令完成）。扫描过的 .env：${hits.join(', ') || '未找到'}`,
+      owner: own,
+    };
+  }
+  if (own.state === 'overdue') {
+    return { name: 'public-owner', ok: false, detail: `责任人已逾期：${own.note}`, owner: own };
+  }
+  const warn = own.state === 'due-soon' || own.state === 'no-deadline' || !readmeMentionsOwner;
+  return {
+    name: 'public-owner',
+    ok: true,
+    warn,
+    detail: `${own.note}${readmeMentionsOwner ? '' : '（README 未写明责任人，建议同步）'}`,
+    owner: own,
+  };
+}
+
 /* ------------------------------ 汇总入口 ------------------------------ */
 
 export async function runChecks({ skipDb = false } = {}) {
@@ -292,6 +359,8 @@ export async function runChecks({ skipDb = false } = {}) {
     checkReadmeReleaseDoc(),
     // RQ-142：公网入口三处文件是否一致（警告项，不阻断内部发布）
     checkPublicEntrypoint(),
+    // RQ-160：**有责任人**优先级高于「有配置」——没有 owner 的需求等于没有排期
+    checkPublicOwner(),
   ];
   const failed = results.filter((r) => !r.ok);
   const warned = results.filter((r) => r.ok && r.warn);

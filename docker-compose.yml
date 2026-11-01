@@ -51,6 +51,12 @@ services:
       TZ: Asia/Shanghai
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_DIR: /app/logs
+      # RQ-160：责任人必须能在**容器内**被断言，只在仓库根的 .env 里写是不够的
+      # （compose 只把 .env 当变量来源，不会自动透传未声明的键）
+      PUBLIC_ENTRY_OWNER: ${PUBLIC_ENTRY_OWNER:-}
+      PUBLIC_ENTRY_DEADLINE: ${PUBLIC_ENTRY_DEADLINE:-}
+      # RQ-156：对外地址（分享链接与回调的唯一落点）
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     volumes:
       - ./backend/logs:/app/logs
     expose:

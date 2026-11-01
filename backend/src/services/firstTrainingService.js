@@ -13,6 +13,7 @@
  */
 
 import pool from '../db.js';
+import { trafficScopeJoin, trafficScopeWhere, boardScopeOf, DEFAULT_TRAFFIC_SCOPE } from './testIsolationService.js';
 
 /** 引导路径四步（顺序即漏斗顺序，不可调换） */
 export const GUIDE_STEPS = [
@@ -85,13 +86,16 @@ export function summarizeGuideFunnel(counts = {}, o = {}) {
 }
 
 /** 从 DB 取数（RQ-110）：按事件分组计数 + 开始→结算的中位耗时 */
-export async function guideFunnel({ days = 30 } = {}) {
+export async function guideFunnel({ days = 30, scope = DEFAULT_TRAFFIC_SCOPE } = {}) {
   const d = Math.min(365, Math.max(1, Number(days) || 30));
+  const sc = boardScopeOf({ scope });
   const { rows } = await pool.query(
-    `SELECT event, COUNT(*)::int AS cnt
-       FROM analytics_events
-      WHERE event = ANY($1::text[]) AND created_at >= now() - ($2 || ' days')::interval
-      GROUP BY event`,
+    `SELECT a.event, COUNT(*)::int AS cnt
+       FROM analytics_events a
+       ${trafficScopeJoin({ eventAlias: 'a', userAlias: 'u' })}
+      WHERE a.event = ANY($1::text[]) AND a.created_at >= now() - ($2 || ' days')::interval
+        AND ${trafficScopeWhere({ eventAlias: 'a', userAlias: 'u', scope: sc })}
+      GROUP BY a.event`,
     [GUIDE_EVENTS, String(d)]
   );
   const counts = {};
@@ -104,10 +108,14 @@ export async function guideFunnel({ days = 30 } = {}) {
               MIN(b.created_at) FILTER (WHERE b.event = 'first_training_finish') AS t1
          FROM analytics_events a
          JOIN analytics_events b ON b.user_id = a.user_id
+         ${trafficScopeJoin({ eventAlias: 'a', userAlias: 'ua' })}
+         ${trafficScopeJoin({ eventAlias: 'b', userAlias: 'ub' })}
         WHERE a.event = 'first_training_start'
           AND b.event = 'first_training_finish'
           AND b.created_at >= a.created_at
           AND a.created_at >= now() - ($1 || ' days')::interval
+          AND ${trafficScopeWhere({ eventAlias: 'a', userAlias: 'ua', scope: sc })}
+          AND ${trafficScopeWhere({ eventAlias: 'b', userAlias: 'ub', scope: sc })}
         GROUP BY a.user_id
      )
      SELECT EXTRACT(EPOCH FROM (t1 - t0)) AS sec FROM pairs WHERE t1 IS NOT NULL`,
@@ -120,5 +128,5 @@ export async function guideFunnel({ days = 30 } = {}) {
       : (secs[secs.length / 2 - 1] + secs[secs.length / 2]) / 2
     : null;
 
-  return { days: d, ...summarizeGuideFunnel(counts, { medianSec }) };
+  return { days: d, scope: sc, ...summarizeGuideFunnel(counts, { medianSec }) };
 }

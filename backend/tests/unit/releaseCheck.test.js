@@ -86,11 +86,13 @@ test('P3 · RQ-87 跳过 DB 时不因缺少 DATABASE_URL 而崩溃', async () =>
 test('P3 · RQ-87 runChecks 在无数据库环境下仍能完成全部检查', async () => {
   await assert.doesNotReject(() => runChecks({ skipDb: true }));
   const report = await runChecks({ skipDb: true });
-  // RQ-145（双远端同哈希）与 RQ-142（公网入口三处一致）为 v12 新增的两项
-  assert.equal(report.results.length, 8);
+  // RQ-145（双远端同哈希）与 RQ-142（公网入口三处一致）为 v12 新增的两项；
+  // RQ-160（公网责任人）为 v13 新增的第三项
+  assert.equal(report.results.length, 9);
   const names = report.results.map((r) => r.name);
   assert.ok(names.includes('remote-parity'), 'RQ-145 双远端同步校验必须纳入发布前检查');
   assert.ok(names.includes('public-entrypoint'), 'RQ-142 公网入口审计必须纳入发布前检查');
+  assert.ok(names.includes('public-owner'), 'RQ-160 公网责任人必须纳入发布前检查');
   for (const r of report.results) {
     assert.ok(r.name && r.detail, '每个检查项都必须有名称与说明');
     assert.equal(typeof r.ok, 'boolean');

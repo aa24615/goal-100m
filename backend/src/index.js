@@ -22,6 +22,7 @@ import blindRoutes from './routes/blind.js';
 import growthRoutes from './routes/growth.js';
 import challengeRoutes from './routes/challenge.js';
 import publicRoutes from './routes/public.js';
+import inviteRoutes from './routes/invite.js';
 import { archivedPayload } from './services/decommissionService.js';
 import { matchOrders } from './orders.js';
 import { loadMarket, startMarket, setBroadcaster, getSnapshot, onTick } from './market.js';
@@ -119,6 +120,7 @@ export function createApp() {
   app.use('/api', growthRoutes);
   app.use('/api', challengeRoutes);
   app.use('/api', publicRoutes);
+  app.use('/api', inviteRoutes);
 
   // 兜底中间件必须放在所有路由之后：记录 404 与未捕获异常
   app.use(notFoundHandler);

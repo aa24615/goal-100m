@@ -16,6 +16,9 @@
  *   5. errors        发布后错误表新增 0 条
  * 附加一项（同属 RQ-123「发布后必跑」）：
  *   6. error-logs    发布后后端日志新增 ERROR 0 条
+ * v13 新增两项：
+ *   7. telemetry-consistency 埋点与业务表按 sessionId 双向对账（RQ-158，需 DB）
+ *   8. verification-record   本次验证落库，并校验「连续 2 次发布均有验证记录」（RQ-160）
  *
  * 用法：
  *   node src/scripts/verifyRelease.js [--json] [--base=http://localhost:8080]
@@ -27,6 +30,9 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+
+import { checkTelemetryConsistency, recordVerification, verificationStreak, latestVerifications } from '../services/releaseGateService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..', '..', '..');
@@ -47,6 +53,10 @@ export const REQUIRED_ROUTES = [
   { path: '/api/analytics/north-star', allow: [200, 401], label: 'RQ-98 北极星' },
   // 已下线：410 是预期，404 说明归档中间件没生效
   { path: '/api/rooms', allow: [410], label: 'RQ-116 零使用功能归档' },
+  // v13：隔离自检与邀请归因（需登录，401 即证明路由已上线）
+  { path: '/api/analytics/isolation', allow: [200, 401], label: 'RQ-157 自测流量隔离自检' },
+  { path: '/api/invite/funnel', allow: [200, 401], label: 'RQ-159 邀请漏斗' },
+  { path: '/api/invite/codes', allow: [200, 401], label: 'RQ-159 邀请码' },
 ];
 
 function defaultBaseUrl() {
@@ -243,6 +253,61 @@ export function checkErrorLogs({ since = new Date(), dir = LOG_DIR, readFn = rea
   };
 }
 
+/* ------------------------------ 7. 埋点一致性（RQ-158） ------------------------------ */
+
+/**
+ * 埋点与业务表按 sessionId 双向对账。
+ *
+ * 无 DB 时降级为 warn —— 但**必须把「未校验」写进 detail**。
+ * 静默跳过会让「发布后验证」变成一张永远全绿的清单，这正是 RQ-158 要防的事。
+ */
+export async function checkConsistency({ queryFn = null, days = 3650 } = {}) {
+  if (!queryFn) {
+    return { name: 'telemetry-consistency', ok: true, warn: true, detail: '未提供 queryFn，跳过埋点一致性对账（RQ-158 未校验）' };
+  }
+  return checkTelemetryConsistency({ queryFn, days });
+}
+
+/* ------------------------------ 8. 验证留痕（RQ-160） ------------------------------ */
+
+export function gitHead({ execFn = execFileSync, cwd = REPO_ROOT } = {}) {
+  try {
+    return String(execFn('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' })).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把本次验证结果落库，并校验「连续 2 次发布均有验证记录」。
+ *
+ * ok 的判据刻意**只取「记录是否落库」**，不把 streak 算进去：
+ * streak 要求 ≥2，若把它算进 ok，则第一次跑这个脚本时必然失败，
+ * 于是「发布后必跑验证」这条流程在最需要它的时候被自己判死。
+ * streak 作为 warn 输出——它回答的是「流程是否稳定」，而不是「本次是否验证过」。
+ */
+export async function checkVerificationRecord({ queryFn = null, baseUrl = '', report = {}, commit = null, execFn = execFileSync } = {}) {
+  const sha = commit || gitHead({ execFn });
+  if (!queryFn) {
+    return { name: 'verification-record', ok: true, warn: true, detail: '未提供 queryFn，跳过验证留痕（RQ-160 未校验）', commit: sha };
+  }
+  const rec = await recordVerification({ queryFn, gitCommit: sha, baseUrl, report });
+  if (!rec.recorded) {
+    return { name: 'verification-record', ok: false, detail: `验证记录落库失败：${rec.reason || '未知原因'}`, commit: sha };
+  }
+  const { rows } = await latestVerifications({ queryFn, limit: 20 });
+  const streak = verificationStreak(rows || []);
+  return {
+    name: 'verification-record',
+    ok: true,
+    warn: !streak.ok,
+    detail: `已落库（id=${rec.id}）${streak.ok ? '' : '；'}${streak.note}`,
+    commit: sha,
+    id: rec.id,
+    streak,
+  };
+}
+
 /* ------------------------------ 汇总 ------------------------------ */
 
 export async function runVerify(opts = {}) {
@@ -259,7 +324,14 @@ export async function runVerify(opts = {}) {
     await checkTelemetry({ ...o, baseUrl, queryFn }),
     await checkErrorTable({ queryFn, since }),
     checkErrorLogs({ since, ...o }),
+    // RQ-158：埋点与业务表对账（差异不再靠人工翻表发现）
+    await checkConsistency({ queryFn, days: o.consistencyDays || 3650 }),
   ];
+  const partial = { ok: results.filter((r) => !r.ok).length === 0, results, baseUrl, since };
+  // RQ-160：留痕必须在前 7 项之后——记录的是「本次到底验出了什么」，
+  // 若把自己也记进去，就等于用一条还没算完的结论去描述自己。
+  results.push(await checkVerificationRecord({ queryFn, baseUrl, report: partial, commit: o.gitCommit || null, execFn: o.execFn }));
+
   const failed = results.filter((r) => !r.ok);
   const warned = results.filter((r) => r.ok && r.warn);
   return { ok: failed.length === 0, failed, warned, results, baseUrl, since };

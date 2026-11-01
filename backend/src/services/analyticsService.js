@@ -5,6 +5,7 @@
 import pool from '../db.js';
 import { logger } from '../logger.js';
 import { clampLimit } from '../utils/num.js';
+import { trafficScopeJoin, trafficScopeWhere, boardScopeOf, DEFAULT_TRAFFIC_SCOPE, classifyIngest } from './testIsolationService.js';
 
 export const EVENTS = [
   'replay_start',
@@ -57,48 +58,77 @@ export function isValidEvent(name) {
   return EVENTS.includes(String(name));
 }
 
-/** 记录埋点；未知事件直接丢弃（不写库），避免噪声污染统计口径 */
-export async function track(userId, event, payload = {}) {
+/**
+ * 记录埋点；未知事件直接丢弃（不写库），避免噪声污染统计口径。
+ *
+ * RQ-157：入库前先判一次「这是不是自测流量」并落进 `is_test`。
+ * 放在写入侧而不是事后打标，理由很直接——v12 已经能事后打标了，
+ * 但 4521 条事件至今 `is_test` 全为 f，**因为没人去执行打标**。
+ * 写入侧判定不依赖任何人记得执行，新产生的污染当天就被分好类。
+ *
+ * @param {object} [opts] { user, headers, ua, privateIp, isTest }
+ */
+export async function track(userId, event, payload = {}, opts = {}) {
   if (!isValidEvent(event)) return false;
-  await pool.query('INSERT INTO analytics_events (user_id, event, payload) VALUES ($1,$2,$3)', [
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const verdict = classifyIngest({ user: o.user, headers: o.headers, ua: o.ua, privateIp: o.privateIp, isTest: o.isTest, body: payload });
+  await pool.query('INSERT INTO analytics_events (user_id, event, payload, is_test) VALUES ($1,$2,$3,$4)', [
     userId ?? null,
     event,
     JSON.stringify(payload || {}),
+    verdict.isTest,
   ]);
-  logger.debug('埋点已记录', { userId, event });
+  logger.debug('埋点已记录', { userId, event, isTest: verdict.isTest });
   return true;
 }
 
+/**
+ * RQ-157：所有看板查询的默认口径是「真实流量」，测试流量默认不可见。
+ * 传 `{ scope: 'all' }` 才能看全量（仅供排障与口径审查）。
+ */
+function scopeOf(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const raw = String(o.scope ?? DEFAULT_TRAFFIC_SCOPE).toLowerCase();
+  return boardScopeOf({ scope: raw });
+}
+
 /** 按日/周统计某类事件的次数与人数（RQ-35：可按日/周统计） */
-export async function statsByDay(event, days = 30) {
+export async function statsByDay(event, days = 30, opts = {}) {
   const d = Math.min(365, Math.max(1, Number(days) || 30));
+  const scope = scopeOf(opts);
   const { rows } = await pool.query(
-    `SELECT ((created_at AT TIME ZONE 'Asia/Shanghai')::date) AS d,
+    `SELECT ((e.created_at AT TIME ZONE 'Asia/Shanghai')::date) AS d,
             COUNT(*)::int AS cnt,
-            COUNT(DISTINCT user_id)::int AS users
-       FROM analytics_events
-      WHERE event=$1 AND created_at >= now() - ($2 || ' days')::interval
+            COUNT(DISTINCT e.user_id)::int AS users
+       FROM analytics_events e
+       ${trafficScopeJoin({ eventAlias: 'e', userAlias: 'u' })}
+      WHERE e.event=$1 AND e.created_at >= now() - ($2 || ' days')::interval
+        AND ${trafficScopeWhere({ eventAlias: 'e', userAlias: 'u', scope })}
       GROUP BY 1 ORDER BY 1 ASC`,
     [event, String(d)]
   );
   return {
     event,
     days: d,
+    scope,
     rows: rows.map((r) => ({ date: String(r.d), count: r.cnt, users: r.users })),
   };
 }
 
 /** 汇总视图：四类关键行为一次取回 */
-export async function overview(days = 7) {
+export async function overview(days = 7, opts = {}) {
   const d = Math.min(365, Math.max(1, Number(days) || 7));
+  const scope = scopeOf(opts);
   const { rows } = await pool.query(
-    `SELECT event, COUNT(*)::int AS cnt, COUNT(DISTINCT user_id)::int AS users
-       FROM analytics_events
-      WHERE created_at >= now() - ($1 || ' days')::interval
-      GROUP BY event ORDER BY cnt DESC`,
+    `SELECT e.event, COUNT(*)::int AS cnt, COUNT(DISTINCT e.user_id)::int AS users
+       FROM analytics_events e
+       ${trafficScopeJoin({ eventAlias: 'e', userAlias: 'u' })}
+      WHERE e.created_at >= now() - ($1 || ' days')::interval
+        AND ${trafficScopeWhere({ eventAlias: 'e', userAlias: 'u', scope })}
+      GROUP BY e.event ORDER BY cnt DESC`,
     [String(d)]
   );
-  return { days: d, events: rows.map((r) => ({ event: r.event, count: r.cnt, users: r.users })) };
+  return { days: d, scope, events: rows.map((r) => ({ event: r.event, count: r.cnt, users: r.users })) };
 }
 
 /* ------------------------------------------------------------------ *
@@ -214,30 +244,34 @@ function clampDays(d, def, max = 365) {
 }
 
 /** 日/周维度活跃与事件量 */
-export async function dashboard({ days = 30, granularity = 'day' } = {}) {
+export async function dashboard({ days = 30, granularity = 'day', scope = DEFAULT_TRAFFIC_SCOPE } = {}) {
   const d = clampDays(days, 30);
   const week = String(granularity).toLowerCase() === 'week';
+  const sc = boardScopeOf({ scope });
   const bucket = week
-    ? `date_trunc('week', (created_at AT TIME ZONE 'Asia/Shanghai'))::date`
-    : `((created_at AT TIME ZONE 'Asia/Shanghai')::date)`;
+    ? `date_trunc('week', (e.created_at AT TIME ZONE 'Asia/Shanghai'))::date`
+    : `((e.created_at AT TIME ZONE 'Asia/Shanghai')::date)`;
 
   const { rows } = await pool.query(
     `SELECT ${bucket} AS bucket,
             COUNT(*)::int                        AS events,
-            COUNT(DISTINCT user_id)::int         AS active_users,
-            COUNT(*) FILTER (WHERE event='blind_start')::int   AS blind_start,
-            COUNT(*) FILTER (WHERE event='blind_finish')::int  AS blind_finish,
-            COUNT(*) FILTER (WHERE event='blind_decision')::int AS blind_decision,
-            COUNT(*) FILTER (WHERE event='checkup_view')::int  AS checkup_view,
-            COUNT(*) FILTER (WHERE event='replay_finish')::int AS replay_finish
-       FROM analytics_events
-      WHERE created_at >= now() - ($1 || ' days')::interval
+            COUNT(DISTINCT e.user_id)::int       AS active_users,
+            COUNT(*) FILTER (WHERE e.event='blind_start')::int   AS blind_start,
+            COUNT(*) FILTER (WHERE e.event='blind_finish')::int  AS blind_finish,
+            COUNT(*) FILTER (WHERE e.event='blind_decision')::int AS blind_decision,
+            COUNT(*) FILTER (WHERE e.event='checkup_view')::int  AS checkup_view,
+            COUNT(*) FILTER (WHERE e.event='replay_finish')::int AS replay_finish
+       FROM analytics_events e
+       ${trafficScopeJoin({ eventAlias: 'e', userAlias: 'u' })}
+      WHERE e.created_at >= now() - ($1 || ' days')::interval
+        AND ${trafficScopeWhere({ eventAlias: 'e', userAlias: 'u', scope: sc })}
       GROUP BY 1 ORDER BY 1 ASC`,
     [String(d)]
   );
 
   return {
     days: d,
+    scope: sc,
     granularity: week ? 'week' : 'day',
     retentionDays: RETENTION_DAYS,
     buckets: rows.map((r) => ({
@@ -312,16 +346,19 @@ function toDate(v) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-export async function retention({ days = 30, window = DASHBOARD_RETENTION_WINDOW } = {}) {
+export async function retention({ days = 30, window = DASHBOARD_RETENTION_WINDOW, scope = DEFAULT_TRAFFIC_SCOPE } = {}) {
   const d = clampDays(days, 30);
   const w = Math.min(30, Math.max(1, Math.floor(Number(window) || DASHBOARD_RETENTION_WINDOW)));
+  const sc = boardScopeOf({ scope });
 
   const { rows } = await pool.query(
     `WITH act AS (
-       SELECT DISTINCT user_id, ((created_at AT TIME ZONE 'Asia/Shanghai')::date) AS d
-         FROM analytics_events
-        WHERE user_id IS NOT NULL
-          AND created_at >= now() - (($1 || ' days')::interval + ($2 || ' days')::interval)
+       SELECT DISTINCT e.user_id, ((e.created_at AT TIME ZONE 'Asia/Shanghai')::date) AS d
+         FROM analytics_events e
+         ${trafficScopeJoin({ eventAlias: 'e', userAlias: 'u' })}
+        WHERE e.user_id IS NOT NULL
+          AND e.created_at >= now() - (($1 || ' days')::interval + ($2 || ' days')::interval)
+          AND ${trafficScopeWhere({ eventAlias: 'e', userAlias: 'u', scope: sc })}
      )
      SELECT c.d AS cohort_day,
             COUNT(DISTINCT c.user_id)::int AS cohort,
@@ -336,7 +373,7 @@ export async function retention({ days = 30, window = DASHBOARD_RETENTION_WINDOW
     [String(d), String(w)]
   );
 
-  return { days: d, ...summarizeRetention(rows, { window: w }) };
+  return { days: d, scope: sc, ...summarizeRetention(rows, { window: w }) };
 }
 
 /** 清理过期埋点（保留 180 天，远长于 90 天回溯要求） */

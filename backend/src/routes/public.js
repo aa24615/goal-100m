@@ -1,6 +1,9 @@
 // 公网可达性自检与游客会话（RQ-121 规范端点 / RQ-122 公网入口 / RQ-108 免登录练一次）
 
 import express from 'express';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import pool from '../db.js';
 import { asyncHandler, businessError } from '../middleware.js';
 import { optionalAuth } from '../auth.js';
@@ -21,8 +24,58 @@ import {
   GUEST_TODAY_SQL,
 } from '../services/guestService.js';
 import { COMPLETION } from '../services/completionContract.js';
+import { ownerState, frozenGate, FROZEN_RQS } from '../services/publicEntryService.js';
 
 const router = express.Router();
+
+/**
+ * 读取仓库根的三个配置文件（.env / nginx.conf / README.md）。
+ *
+ * 容器里这些文件不存在（backend 镜像只有 /app），此时**静默降级**：
+ * 用进程环境变量补齐 .env 的口径，绝不因为读不到文件就报一堆假 blocker ——
+ * 假 blocker 会让运维在第一眼看到 5 个红叉之后放弃读这份报告（F-99 的行为模式）。
+ */
+function repoTexts() {
+  const out = { envText: '', nginxText: '', readmeText: '', files: [] };
+  try {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+    const cands = [
+      ['.env', 'envText'],
+      [join('frontend', 'nginx.conf'), 'nginxText'],
+      ['README.md', 'readmeText'],
+    ];
+    for (const [rel, key] of cands) {
+      const p = join(root, rel);
+      if (existsSync(p)) {
+        out[key] = readFileSync(p, 'utf8');
+        out.files.push(rel);
+      }
+    }
+  } catch {
+    /* 读不到就降级 */
+  }
+  if (!out.envText) {
+    // 用进程环境补齐：容器里 .env 由 docker-compose 注入环境变量，语义等价
+    out.envText = ['PUBLIC_BASE_URL', 'DOMAIN', 'PUBLIC_HOST', 'PUBLIC_ENTRY_OWNER', 'PUBLIC_ENTRY_DEADLINE']
+      .filter((k) => process.env[k])
+      .map((k) => `${k}=${process.env[k]}`)
+      .join('\n');
+  }
+  return out;
+}
+
+function envMap(envText) {
+  return Object.fromEntries(
+    String(envText ?? '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#') && l.includes('='))
+      .map((l) => {
+        const i = l.indexOf('=');
+        return [l.slice(0, i).trim(), l.slice(i + 1).trim().replace(/^["']|["']$/g, '')];
+      })
+  );
+}
 
 /* ---------------------- RQ-121 / RQ-122 公网可达性 ---------------------- */
 
@@ -38,6 +91,21 @@ router.get('/public/access', (req, res) => {
   const a = resolvePublicAccess(process.env);
   const ip = String(req.query?.ip || '').trim();
   const suggested = isPublicIpv4(ip) ? suggestEphemeralDomain(ip) : null;
+
+  /**
+   * RQ-160 责任人 + RQ-172 冻结护栏：与「能不能访问」一起返回。
+   *
+   * 分开成两个端点的结果是没人会去调第二个——而 owner 恰恰是最容易过期、
+   * 且过期后无声无息的那一项。把三者放在同一份响应里，运维每次 curl 都会看到。
+   */
+  const texts = repoTexts();
+  const env = envMap(texts.envText);
+  const own = ownerState({
+    owner: env.PUBLIC_ENTRY_OWNER || process.env.PUBLIC_ENTRY_OWNER,
+    deadline: env.PUBLIC_ENTRY_DEADLINE || process.env.PUBLIC_ENTRY_DEADLINE,
+  });
+  const gate = frozenGate({ publicReady: a.ready, owner: own });
+
   res.json({
     ...a,
     envKeys: PUBLIC_ACCESS_ENV_KEYS,
@@ -49,7 +117,43 @@ router.get('/public/access', (req, res) => {
           note: '无自有域名时的过渡方案；正式域名到位后替换 PUBLIC_BASE_URL 即可。',
         }
       : null,
-    nextAction: a.ready ? '公网入口已就绪，进入 RQ-124 首训实测。' : (a.blockers[0] ?? '配置 PUBLIC_BASE_URL'),
+    owner: own,
+    gate,
+    provision: a.ready
+      ? null
+      : 'node src/scripts/provisionPublicEntry.js --domain=<域名> --owner=<责任人> --deadline=YYYY-MM-DD --apply',
+    nextAction: a.ready
+      ? own.blocked
+        ? `公网已就绪，但责任人状态为 ${own.state}：${own.note}`
+        : '公网入口已就绪，进入 RQ-159 外部真实用户验证。'
+      : own.blocked
+        ? `公网未就绪且无责任人：${own.note}（连续多版未完成的根因是没有 owner，不只是没配域名）`
+        : (a.blockers[0] ?? '配置 PUBLIC_BASE_URL'),
+  });
+});
+
+/**
+ * RQ-172 冻结护栏：明确列出「RQ-156 完成前不许开工」的需求。
+ *
+ * 单独成端点的理由：这个列表是给**需求评审**用的，评审时需要一个能直接贴进
+ * 会议记录的清单，而不是从公网自检的大响应里翻字段。
+ */
+router.get('/public/gate', (req, res) => {
+  const a = resolvePublicAccess(process.env);
+  const texts = repoTexts();
+  const env = envMap(texts.envText);
+  const own = ownerState({
+    owner: env.PUBLIC_ENTRY_OWNER || process.env.PUBLIC_ENTRY_OWNER,
+    deadline: env.PUBLIC_ENTRY_DEADLINE || process.env.PUBLIC_ENTRY_DEADLINE,
+  });
+  const requested = String(req.query?.rq || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  res.json({
+    ...frozenGate({ publicReady: a.ready, owner: own, requested: requested.length ? requested : undefined }),
+    frozenList: FROZEN_RQS,
+    rule: 'RQ-156 未完成前，RQ-161~170 一律不进排期（本条不再软化）。',
   });
 });
 

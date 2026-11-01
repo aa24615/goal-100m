@@ -26,6 +26,7 @@ import { buildSmallSampleFacts } from '../services/smallSampleService.js';
 import { buildTierProgress } from '../services/tierProgressService.js';
 import { withDevice } from '../services/deviceService.js';
 import { auditTelemetry, purgeDuplicates } from '../services/telemetryIntegrityService.js';
+import { boardScopeOf } from '../services/testIsolationService.js';
 import { firstTrainingEffectiveRate } from '../services/effectiveCompletionService.js';
 import { externalUserFunnel, userMix, planTestMarks, applyTestMarks } from '../services/testTrafficService.js';
 import { markPolluted } from '../services/telemetryIntegrityService.js';
@@ -141,7 +142,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const { event } = req.query;
     if (!event || !isValidEvent(String(event))) throw businessError('未知事件类型', 400);
-    res.json(await statsByDay(String(event), Number(req.query.days) || 30));
+    res.json(await statsByDay(String(event), Number(req.query.days) || 30, { scope: boardScopeOf(req.query) }));
   })
 );
 
@@ -149,7 +150,7 @@ router.get(
   '/analytics/overview',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    res.json(await overview(Number(req.query.days) || 7));
+    res.json(await overview(Number(req.query.days) || 7, { scope: boardScopeOf(req.query) }));
   })
 );
 
@@ -168,6 +169,7 @@ router.get(
       await dashboard({
         days: Number(req.query.days) || 30,
         granularity: g === 'week' ? 'week' : 'day',
+        scope: boardScopeOf(req.query),
       })
     );
   })
@@ -185,6 +187,7 @@ router.get(
       await retention({
         days: Number(req.query.days) || 30,
         window: Number(req.query.window) || DASHBOARD_RETENTION_WINDOW,
+        scope: boardScopeOf(req.query),
       })
     );
   })
@@ -244,7 +247,7 @@ router.get(
   '/analytics/guide-funnel',
   authMiddleware,
   asyncHandler(async (req, res) => {
-    const r = await guideFunnel({ days: Number(req.query.days) || 30 });
+    const r = await guideFunnel({ days: Number(req.query.days) || 30, scope: boardScopeOf(req.query) });
     res.json({ ...r, steps: r.steps, stepDefs: GUIDE_STEPS });
   })
 );
@@ -533,6 +536,59 @@ router.get(
       sessionCount = g.sessionCount;
     }
     res.json(retentionNotice({ isGuest, ageDays, sessionCount }));
+  })
+);
+
+/* ---------------------- RQ-157 自测流量隔离自检 ---------------------- */
+
+/**
+ * 隔离自检：三件事一起看，缺一件都会得出「已经干净了」的假结论。
+ *   ① 分口径计数（测试流量占比是否可查）
+ *   ② blind_resume 单会话计数（历史 715 条是否被削掉）
+ *   ③ 源码扫描（有没有看板 SQL 忘了声明口径）
+ *
+ * 第 ③ 项是这一版的关键：v12 的真实状态是「打标有了，看板照旧全量读」，
+ * 只查前两项会一路绿灯，而指标一分钱没变干净。
+ */
+router.get(
+  '/analytics/isolation',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const { isolationReport, collectSourceFiles } = await import('../services/testIsolationService.js');
+    const { readFileSync, readdirSync } = await import('node:fs');
+    const { join, dirname, resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const srcRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const files = collectSourceFiles({
+      root: srcRoot,
+      readFn: readFileSync,
+      readdirFn: readdirSync,
+      joinFn: join,
+    });
+    const r = await isolationReport({ queryFn: (sql, params) => pool.query(sql, params), files });
+    res.json(r);
+  })
+);
+
+/** 历史污染打标预览：只算不改 */
+router.get(
+  '/analytics/isolation/backfill',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const { planHistoricalMarks } = await import('../services/testIsolationService.js');
+    res.json(await planHistoricalMarks({ queryFn: (sql, params) => pool.query(sql, params) }));
+  })
+);
+
+/** 执行历史打标：打标不删除，可逆；仍需显式 POST + ?apply=1 */
+router.post(
+  '/analytics/isolation/backfill',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const { applyHistoricalMarks } = await import('../services/testIsolationService.js');
+    // 只认 ?apply=1：body 里带 apply 会在「复制一段 curl」时被无意识带上
+    const apply = String(req.query?.apply ?? '') === '1';
+    res.json(await applyHistoricalMarks({ queryFn: (sql, params) => pool.query(sql, params), apply }));
   })
 );
 

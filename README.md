@@ -143,56 +143,18 @@ cd backend && node src/scripts/verifyRelease.js --json
 | 5 | `errors` | 发布后 `frontend_errors` 新增 0 条 |
 | 6 | `error-logs` | 发布后后端日志新增 ERROR 0 条 |
 
-## 公网入口（RQ-122）
+## 公网入口
 
-> **当前状态：未配置。** 唯一入口是本机 `http://localhost:8080`，外部设备打不开。
-> 在公网入口就绪前，获客、留存、首训转化三项在物理上都不可执行——分享链接发出去别人打不开。
+- **对外唯一入口**：*未配置*。当前只能在部署机本机用 `http://localhost:8080` 访问。
 
-配置步骤：
+| 项 | 值 |
+|---|---|
+| 责任人（RQ-160） | `zyan` |
+| 截止日（RQ-160） | `2026-11-16` |
+| 状态 | ok —— owner 与截止日均已指定，剩余 15 天。 |
 
-1. 准备域名。没有自有域名时可用免费泛解析过渡域名（把公网 IP 编进域名），先跑通再换正式域名：
-
-   ```bash
-   curl "http://localhost:8080/api/public/access?ip=你的公网IP"
-   # → suggestion.domain / suggestion.env 给出可直接使用的域名与 .env 行
-   ```
-
-2. 在 `.env` 写入唯一对外地址：
-
-   ```bash
-   PUBLIC_BASE_URL=https://你的域名
-   ```
-
-3. 让反代以该域名提供 HTTPS（HTTP 一律 301 跳 HTTPS）。配置片段可直接取：
-
-   ```bash
-   curl http://localhost:8080/api/public/access/nginx
-   curl http://localhost:8080/api/public/access/env
-   ```
-
-4. 自检（无需登录，部署机上直接 curl）：
-
-   ```bash
-   curl http://localhost:8080/api/public/access
-   ```
-
-   返回 `ready: true`、`blockers: []` 才算具备公网可达性；`checklist` 给出逐项完成情况，
-   `nextAction` 给出下一步该做什么。**localhost 与内网段一律判为不可对外**——防止自欺。
-
-5. **RQ-142 新增：三处文件一致性自检。**
-   前四版「未完成」的根因是没人去读那三个文件，大家读的是上一版需求文档里的结论。
-   现在发布前检查会直接解析 `.env` / `frontend/nginx.conf` / `README.md` 并列出缺项：
-
-   ```bash
-   npm run release:check     # 输出 [WARN] public-entrypoint: 公网入口未就绪（缺哪几项）
-   ```
-
-   判定项：`.env` 是否配了 https 的 `PUBLIC_BASE_URL`、nginx `server_name` 是否仍为 `_`、
-   是否配置了 HTTP 301 跳 HTTPS、是否监听 443 ssl、README 是否写明公网地址。
-
-6. **RQ-145 新增：双远端同步校验。**
-   `git push origin main` 会同时推送 GitHub 与 CNB，但任一侧失败都会留下「一份提交只在一个远端」。
-   发布前检查新增 `remote-parity` 项，两个远端 HEAD 不同哈希即阻断发布。
+上线后 10 分钟内必须执行 `DATABASE_URL=... node src/scripts/verifyRelease.js`，
+并把结果贴到本次发布的提交说明里；连续两次发布无验证记录即视为流程失效（RQ-160）。
 
 ## 结算口径说明书（RQ-150 / RQ-151）
 

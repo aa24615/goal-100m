@@ -8,6 +8,7 @@ import { asyncHandler, proxyClientIp } from './middleware.js';
 import { track } from './services/analyticsService.js';
 import { trackOnce } from './services/telemetryIntegrityService.js';
 import { normalizeChannel } from './services/northStarService.js';
+import { normalizeInviteCode } from './services/inviteService.js';
 
 const router = express.Router();
 const INITIAL_CAPITAL = 1000000; // 初始虚拟资金 ¥1,000,000
@@ -152,9 +153,11 @@ export function validateRegister(username, email, password) {
 router.post(
   '/register',
   asyncHandler(async (req, res) => {
-    const { username, email, password, channel } = req.body || {};
+    const { username, email, password, channel, inviteCode } = req.body || {};
     const u = norm(username);
     const em = norm(email);
+    // RQ-159：邀请码在注册时就落到用户行，而不是靠埋点顺序反推（v10 教训：顺序推断会错）
+    const inv = normalizeInviteCode(inviteCode);
     // RQ-105 获客归因：渠道在注册时就落到用户行，跨会话归因才不会随埋点顺序漂移
     const chan = normalizeChannel(channel);
     if (!u || !em || !password) {
@@ -183,6 +186,27 @@ router.post(
       );
       const user = rows[0];
       const token = signToken(user.id);
+      /**
+       * RQ-159 邀请归因：单独一句 UPDATE，不并进上面的 INSERT。
+       *
+       * 理由是**迁移滞后不能拖垮注册**：`users.invite_code` 由迁移 0021 新增，
+       * 一旦镜像已更新而迁移未应用，把新列写进 INSERT 会让**所有人注册 500**。
+       * 拆成独立的 UPDATE 后，最坏情况只是这一次归因丢失（有日志可查），注册照常成功。
+       */
+      if (inv) {
+        try {
+          await pool.query('UPDATE users SET invite_code=$2 WHERE id=$1', [user.id, inv]);
+        } catch (e) {
+          logger.warn('邀请码落库失败（注册继续）', { userId: user.id, code: inv, err: e?.message || e });
+        }
+        try {
+          const { bindInvite } = await import('./services/inviteService.js');
+          const b = await bindInvite({ code: inv, userId: user.id, queryFn: (sql, params) => pool.query(sql, params) });
+          if (!b.bound) logger.warn('邀请码绑定失败（注册继续）', { userId: user.id, code: inv, reason: b.reason });
+        } catch (e) {
+          logger.warn('邀请码绑定异常（注册继续）', { userId: user.id, code: inv, err: e?.message || e });
+        }
+      }
       // 埋点只带渠道，不含任何身份信息（硬约束 5）
       // RQ-143：注册是「一生一次」事件，去重后同一账号重复上报不会再进分母
       await trackOnce(user.id, 'signup', { channel: chan }).catch(() => {});
