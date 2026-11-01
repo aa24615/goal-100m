@@ -57,8 +57,16 @@ POST_FIELDS = ["skipped", "alias", "reason", "note", "code", "stockCode", "side"
                "date", "tradeDate", "deadline", "netWin", "isTest", "preset", "tag"]
 
 # 不可逆端点：一律不调用（基线 + 模糊 + 路径全部跳过）
+#
+# 第 19 条教训（2026-11-02）：这里**不止要排除「不可逆」端点，还要排除「会建资源」的端点**。
+# 上一版只排了 reset/finish/abandon，漏了 /api/blind/start —— 它带非法单字段 body 时
+# 依然返回 200（非法字段被忽略、其余走默认值），结果静默新建了 6 个会话。
+# 「返回 200」不等于「没有副作用」。
 DANGER = ("reset", "finish", "abandon", "apply", "purge", "delete",
-          "/api/orders", "/api/watchlist")
+          "/api/orders", "/api/watchlist",
+          # 创建型：即使带非法值也可能成功建会话/回放，事后要按时间核对清理
+          "/api/blind/start", "/api/blind/prescription/start",
+          "/api/replay/start", "/api/challenge/join")
 
 
 def call(method, path, body=None, token=""):
