@@ -285,7 +285,27 @@ export const MARK_SQL = {
        SET is_test = TRUE
      WHERE id = ANY($1::int[])
        AND is_test = FALSE`,
+  /**
+   * 会话级传播：会话已被判为自测，其 blind_* 事件一并打标。
+   *
+   * 为什么需要第三条规则：v12 的打标只覆盖 users 与 blind_sessions，
+   * 而埋点行与之是**分别落库**的。于是出现「会话标了、事件没标」，
+   * 埋点对账（RQ-158）就会把这一局算成「埋点记了不存在的会话」——
+   * 本次上线实测正是这样抓到 event#4528(session=324) 的。
+   */
+  sessionMarked: `
+    UPDATE analytics_events e
+       SET is_test = TRUE
+      FROM blind_sessions s
+     WHERE s.is_test = TRUE
+       AND s.id = NULLIF(e.payload->>'sessionId','')::int
+       AND e.is_test = FALSE`,
   /** 计数用：不动数据 */
+  countSessionMarked: `
+    SELECT COUNT(*)::int AS c
+      FROM analytics_events e
+      JOIN blind_sessions s ON s.id = NULLIF(e.payload->>'sessionId','')::int
+     WHERE s.is_test = TRUE AND e.is_test = FALSE`,
   countUserMarked: `
     SELECT COUNT(*)::int AS c
       FROM analytics_events e
@@ -331,23 +351,27 @@ export function pickDuplicateResumeIds(rows) {
  * @param {object} o { queryFn }
  */
 export async function planHistoricalMarks({ queryFn = null } = {}) {
-  if (!queryFn) return { ok: false, reason: '未提供 queryFn', userMarked: 0, resumeDup: 0, resumeIds: [] };
+  if (!queryFn) return { ok: false, reason: '未提供 queryFn', userMarked: 0, sessionMarked: 0, resumeDup: 0, resumeIds: [] };
   try {
-    const [{ rows: c }, { rows: rs }] = await Promise.all([
+    const [{ rows: c }, { rows: cs }, { rows: rs }] = await Promise.all([
       queryFn(MARK_SQL.countUserMarked, []),
+      queryFn(MARK_SQL.countSessionMarked, []),
       queryFn(MARK_SQL.countResume, []),
     ]);
     const resumeIds = pickDuplicateResumeIds(rs);
+    const userMarked = Number(c[0]?.c ?? 0) || 0;
+    const sessionMarked = Number(cs[0]?.c ?? 0) || 0;
     return {
       ok: true,
-      userMarked: Number(c[0]?.c ?? 0) || 0,
+      userMarked,
+      sessionMarked,
       resumeDup: resumeIds.length,
       resumeScanned: rs.length,
       resumeIds,
-      note: `计划打标：用户级 ${Number(c[0]?.c ?? 0) || 0} 条、blind_resume 重复 ${resumeIds.length} 条（共扫描 ${rs.length} 条）。`,
+      note: `计划打标：用户级 ${userMarked} 条、会话级 ${sessionMarked} 条、blind_resume 重复 ${resumeIds.length} 条（共扫描 ${rs.length} 条）。`,
     };
   } catch (e) {
-    return { ok: false, reason: e?.message || String(e), userMarked: 0, resumeDup: 0, resumeIds: [] };
+    return { ok: false, reason: e?.message || String(e), userMarked: 0, sessionMarked: 0, resumeDup: 0, resumeIds: [] };
   }
 }
 
@@ -358,7 +382,7 @@ export async function planHistoricalMarks({ queryFn = null } = {}) {
 export async function applyHistoricalMarks({ queryFn = null, apply = false } = {}) {
   const plan = await planHistoricalMarks({ queryFn });
   if (!plan.ok) return { ok: false, applied: false, ...plan, note: `打标失败：${plan.reason}` };
-  const changed = { userMarked: 0, resumeDup: 0 };
+  const changed = { userMarked: 0, sessionMarked: 0, resumeDup: 0 };
   if (!apply) {
     return {
       ok: true,
@@ -372,6 +396,8 @@ export async function applyHistoricalMarks({ queryFn = null, apply = false } = {
   try {
     const a = await queryFn(MARK_SQL.userMarked, []);
     changed.userMarked = Number(a?.rowCount ?? 0) || 0;
+    const s = await queryFn(MARK_SQL.sessionMarked, []);
+    changed.sessionMarked = Number(s?.rowCount ?? 0) || 0;
     if (plan.resumeIds.length) {
       const b = await queryFn(MARK_SQL.resumeDup, [plan.resumeIds]);
       changed.resumeDup = Number(b?.rowCount ?? 0) || 0;
@@ -382,7 +408,7 @@ export async function applyHistoricalMarks({ queryFn = null, apply = false } = {
       dryRun: false,
       ...plan,
       changed,
-      note: `已打标：用户级 ${changed.userMarked} 条、blind_resume 重复 ${changed.resumeDup} 条（未删除任何数据）。`,
+      note: `已打标：用户级 ${changed.userMarked} 条、会话级 ${changed.sessionMarked} 条、blind_resume 重复 ${changed.resumeDup} 条（未删除任何数据）。`,
     };
   } catch (e) {
     return { ok: false, applied: false, ...plan, changed, note: `打标失败：${e?.message || e}` };

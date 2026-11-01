@@ -38,6 +38,7 @@ import {
   auditTestIsolation,
   pickDuplicateResumeIds,
   collectSourceFiles,
+  MARK_SQL,
   SCOPE_WINDOW_CHARS,
 } from '../../src/services/testIsolationService.js';
 
@@ -337,6 +338,15 @@ test('P1 · RQ-157 不同会话互不误削，缺 sessionId 的行不参与去�
     { id: 4, subject: 'g1', session_id: null },
   ];
   assert.deepEqual(pickDuplicateResumeIds(rows), []);
+});
+
+test('P1 · RQ-157 会话级打标补齐「会话标了、事件没标」的缺口（RQ-158 实测抓到的那一条）', () => {
+  // 会话被判为自测、但埋点行没标：对账时会被误报成「埋点记了不存在的会话」
+  assert.match(MARK_SQL.sessionMarked, /FROM blind_sessions s/);
+  assert.match(MARK_SQL.sessionMarked, /s\.is_test = TRUE/);
+  assert.match(MARK_SQL.sessionMarked, /s\.id = NULLIF\(e\.payload->>'sessionId',''\)::int/);
+  assert.match(MARK_SQL.sessionMarked, /e\.is_test = FALSE/, '已打标的事件不重复改写');
+  assert.match(MARK_SQL.countSessionMarked, /COUNT\(\*\)/);
 });
 
 test('P3 · RQ-157 pickDuplicateResumeIds 空入参与非数组返回空数组', () => {
