@@ -57,6 +57,11 @@ export const REQUIRED_ROUTES = [
   { path: '/api/analytics/isolation', allow: [200, 401], label: 'RQ-157 自测流量隔离自检' },
   { path: '/api/invite/funnel', allow: [200, 401], label: 'RQ-159 邀请漏斗' },
   { path: '/api/invite/codes', allow: [200, 401], label: 'RQ-159 邀请码' },
+  // v15 阶段零：五项 P0 的可断言端点（全部无需登录，非 200 即未上线）
+  { path: '/api/public/stage-zero', allow: [200], label: 'RQ-173~177 阶段零总览' },
+  { path: '/api/public/status-truth', allow: [200], label: 'RQ-173 状态口径自洽' },
+  { path: '/api/public/landing', allow: [200], label: 'RQ-174 落地页三要素' },
+  { path: '/api/public/help', allow: [200], label: 'RQ-175 访客帮助' },
 ];
 
 function defaultBaseUrl() {
@@ -308,6 +313,75 @@ export async function checkVerificationRecord({ queryFn = null, baseUrl = '', re
   };
 }
 
+/* ------------------------------ 9. 阶段零（RQ-173~177） ------------------------------ */
+
+/**
+ * 阶段零五项 P0 的**上线后**断言。
+ *
+ * 与单测里跑 `auditStageZero` 的区别：单测证明逻辑对，这里证明**线上那一份**
+ * 真的把这些端点与判定跑出来了——v13 的教训是「代码在仓库、镜像没重建、
+ * 迁移没上库」三层可以同时落后，只看仓库源码会得出全绿的假结论。
+ *
+ * RQ-173（对外地址）刻意判 `warn` 而非 `ok:false`：
+ * 它是阶段零里唯一一个**非代码可完成**的项（要买域名、签证书），
+ * 判 fail 会让验证脚本每次都红，而红色一旦成为常态就没人再看了——
+ * 这正是连续六版把未完成写成已完成的心理机制。因此用 warn 保持可见但不阻塞。
+ */
+export async function checkStageZero({ fetchFn = fetch, baseUrl = defaultBaseUrl() } = {}) {
+  let payload = null;
+  try {
+    const res = await fetchFn(`${baseUrl}/api/public/stage-zero`, { redirect: 'manual' });
+    if (!res.ok) {
+      return { name: 'stage-zero', ok: false, detail: `/api/public/stage-zero 返回 ${res.status}` };
+    }
+    payload = await res.json();
+  } catch (e) {
+    return { name: 'stage-zero', ok: false, detail: `阶段零端点不可达：${e?.message || e}` };
+  }
+
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  const failed = items.filter((i) => i && i.ok !== true).map((i) => `${i.rq}(${i.title})`);
+  const entryItem = items.find((i) => i?.rq === 'RQ-173');
+  const entryMissing = entryItem && entryItem.ok !== true;
+
+  return {
+    name: 'stage-zero',
+    ok: failed.length === 0 || (entryMissing && failed.length === 1),
+    // RQ-173 依赖域名与证书，非代码可完成：记为告警而不是失败
+    warn: entryMissing,
+    detail:
+      failed.length === 0
+        ? `阶段零 5/5 通过（版本 ${payload?.version ?? '?'}）`
+        : `阶段零未通过 ${failed.length} 项：${failed.join('、')}${entryMissing ? '（RQ-173 需人工配置域名与证书，记为告警）' : ''}`,
+    ready: payload?.ready === true,
+    failed: payload?.failed || [],
+    frozen: payload?.frozen || [],
+  };
+}
+
+/**
+ * 状态口径自洽（F-102）。
+ *
+ * 单独成项而不并入 stage-zero：v15 实测的缺陷是「同一段里上面写未配置、
+ * 下面写状态 ok」，它是一个**文档层**问题，修法与「入口没配」完全不同
+ * （前者改文案，后者买域名）。混在一起会导致修了文案却以为门牌已挂。
+ */
+export async function checkStatusTruth({ fetchFn = fetch, baseUrl = defaultBaseUrl() } = {}) {
+  try {
+    const res = await fetchFn(`${baseUrl}/api/public/status-truth`, { redirect: 'manual' });
+    if (!res.ok) return { name: 'status-truth', ok: false, detail: `/api/public/status-truth 返回 ${res.status}` };
+    const p = await res.json();
+    return {
+      name: 'status-truth',
+      ok: p?.ok === true,
+      detail: p?.ok ? '状态口径与事实一致。' : `发现 ${p?.count ?? 0} 处矛盾：${p?.verdict ?? ''}`,
+      contradictions: p?.contradictions || [],
+    };
+  } catch (e) {
+    return { name: 'status-truth', ok: false, detail: `状态口径端点不可达：${e?.message || e}` };
+  }
+}
+
 /* ------------------------------ 汇总 ------------------------------ */
 
 export async function runVerify(opts = {}) {
@@ -326,6 +400,9 @@ export async function runVerify(opts = {}) {
     checkErrorLogs({ since, ...o }),
     // RQ-158：埋点与业务表对账（差异不再靠人工翻表发现）
     await checkConsistency({ queryFn, days: o.consistencyDays || 3650 }),
+    // v15 阶段零：RQ-173~177 上线后断言
+    await checkStageZero({ ...o, baseUrl }),
+    await checkStatusTruth({ ...o, baseUrl }),
   ];
   const partial = { ok: results.filter((r) => !r.ok).length === 0, results, baseUrl, since };
   // RQ-160：留痕必须在前 7 项之后——记录的是「本次到底验出了什么」，

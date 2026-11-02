@@ -25,6 +25,15 @@ import {
 } from '../services/guestService.js';
 import { COMPLETION } from '../services/completionContract.js';
 import { ownerState, frozenGate, FROZEN_RQS } from '../services/publicEntryService.js';
+import {
+  auditStageZero,
+  buildLandingCopy,
+  statusTruthfulness,
+  auditDocsPublicness,
+  renderVisitorHelp,
+  rewriteDocForPublic,
+  FROZEN_RQS_V15,
+} from '../services/stageZeroService.js';
 
 const router = express.Router();
 
@@ -154,6 +163,141 @@ router.get('/public/gate', (req, res) => {
     ...frozenGate({ publicReady: a.ready, owner: own, requested: requested.length ? requested : undefined }),
     frozenList: FROZEN_RQS,
     rule: 'RQ-156 未完成前，RQ-161~170 一律不进排期（本条不再软化）。',
+  });
+});
+
+/* ---------------------- v15 阶段零（RQ-173~177） ---------------------- */
+
+/**
+ * 阶段零总览：RQ-173~177 五项 P0 的可断言报告。**无需登录**。
+ *
+ * 刻意不加鉴权，理由与 `/public/access` 相同——这是部署自检接口，
+ * 让运维/自动化在部署机上 curl 一下就能拿到「阶段零到底过了几项」，
+ * 而不是去翻需求文档里上一版写的结论（那是连续六版误判的机制）。
+ *
+ * 支持 `?docs=1` 附带仓库三份文档（.env / nginx / README）的对外化审计结果，
+ * 默认关闭：文档读取有 IO 成本，而自检高频调用时并不需要每次都扫。
+ */
+router.get('/public/stage-zero', (req, res) => {
+  const a = resolvePublicAccess(process.env);
+  const texts = repoTexts();
+  const env = envMap(texts.envText);
+  const own = ownerState({
+    owner: env.PUBLIC_ENTRY_OWNER || process.env.PUBLIC_ENTRY_OWNER,
+    deadline: env.PUBLIC_ENTRY_DEADLINE || process.env.PUBLIC_ENTRY_DEADLINE,
+  });
+
+  const withDocs = String(req.query?.docs || '').trim() === '1';
+  const docsInput = withDocs
+    ? {
+        publicUrl: a.publicUrl,
+        docs: [
+          { name: 'README.md', text: texts.readmeText },
+          { name: 'frontend/nginx.conf', text: texts.nginxText },
+        ].filter((d) => String(d.text || '').length > 0),
+      }
+    : { publicUrl: a.publicUrl, docs: [] };
+
+  const report = auditStageZero({
+    entry: { ready: a.ready, nextAction: a.nextAction, publicUrl: a.publicUrl },
+    owner: own,
+    readmeText: texts.readmeText,
+    docsInput,
+    // 首屏路径与游客能力由前端常量保证，后端此处给出的是**验收口径**而非实时探测
+    landingInput: {
+      elements: ['what', 'register', 'retention'],
+      path: [{ id: 'enter', label: '进入训练', kind: 'click' }, { id: 'start', label: '开始一局', kind: 'click' }],
+      guestTrainable: true,
+    },
+  });
+
+  res.json({
+    ...report,
+    publicUrl: a.publicUrl,
+    owner: own,
+    frozenV13: FROZEN_RQS,
+    hint: '?docs=1 可附带 README / nginx 的对外化审计',
+  });
+});
+
+/**
+ * RQ-173 状态口径自洽：入口事实 vs 文档口径。
+ *
+ * 单独成端点的理由：v15 实测抓到的 F-102 是「同一段里上面写未配置、下面写状态 ok」，
+ * 这类矛盾必须能被**单独 curl 出来贴进会议记录**，埋在大响应里没人会看第二眼。
+ */
+router.get('/public/status-truth', (req, res) => {
+  const a = resolvePublicAccess(process.env);
+  const texts = repoTexts();
+  const env = envMap(texts.envText);
+  const own = ownerState({
+    owner: env.PUBLIC_ENTRY_OWNER || process.env.PUBLIC_ENTRY_OWNER,
+    deadline: env.PUBLIC_ENTRY_DEADLINE || process.env.PUBLIC_ENTRY_DEADLINE,
+  });
+  res.json(statusTruthfulness({ entryReady: a.ready, owner: own, readmeText: texts.readmeText }));
+});
+
+/**
+ * RQ-174 落地页三要素文案。**无需登录**。
+ *
+ * 文案由后端下发而不是前端写死：保留期与游客额度是会变的运营参数，
+ * 前端复制一份常量必然与后端行为漂移——而漂移后的承诺比不承诺更有害。
+ */
+router.get('/public/landing', (req, res) => {
+  res.json({
+    ...buildLandingCopy({
+      guestLimit: process.env.GUEST_DAILY_LIMIT || null,
+      guestDays: process.env.GUEST_RETENTION_DAYS || null,
+      userRetention: process.env.USER_RETENTION_TEXT || '',
+      disclaimer: process.env.LANDING_DISCLAIMER || '',
+    }),
+    maxClicks: 2,
+    guestEntry: '/guest/session',
+  });
+});
+
+/**
+ * RQ-175 面向外部访客的帮助（非部署者视角）。`?format=md` 返回 Markdown 原文。
+ */
+router.get('/public/help', (req, res) => {
+  const a = resolvePublicAccess(process.env);
+  const md = renderVisitorHelp({
+    publicUrl: a.publicUrl,
+    guestLimit: process.env.GUEST_DAILY_LIMIT || null,
+    guestDays: process.env.GUEST_RETENTION_DAYS || null,
+  });
+  if (String(req.query?.format || '').trim().toLowerCase() === 'md') {
+    res.type('text/plain; charset=utf-8').send(md);
+    return;
+  }
+  res.json({ publicUrl: a.publicUrl, markdown: md });
+});
+
+/**
+ * RQ-175 文档对外化改写（dry-run）。
+ * `?path=README.md` 返回把本机地址替换为对外地址后的全文，默认只回摘要。
+ */
+router.get('/public/docs/rewrite', (req, res) => {
+  const a = resolvePublicAccess(process.env);
+  const texts = repoTexts();
+  const target = String(req.query?.path || '').trim();
+  const pool = { 'README.md': texts.readmeText, 'frontend/nginx.conf': texts.nginxText };
+  const name = pool[target] !== undefined ? target : null;
+  if (!name) {
+    res.json({
+      ok: false,
+      available: Object.keys(pool).filter((k) => String(pool[k] || '').length > 0),
+      note: a.publicUrl ? '指定 ?path= 可查看改写后的全文。' : '尚未配置 PUBLIC_BASE_URL，无法改写（改写为空串比不改更糟）。',
+    });
+    return;
+  }
+  const scan = auditDocsPublicness([{ name, text: pool[name] }], { publicUrl: a.publicUrl });
+  res.json({
+    ok: true,
+    name,
+    publicUrl: a.publicUrl || null,
+    ...scan.files[0],
+    rewritten: a.publicUrl ? rewriteDocForPublic(pool[name], a.publicUrl) : null,
   });
 });
 

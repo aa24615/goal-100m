@@ -1401,6 +1401,50 @@ export interface ArchivedItem {
   replacement: { path: string; label: string } | null;
 }
 
+/* ---------------- v15 阶段零（RQ-173 ~ RQ-177） ---------------- */
+
+/** RQ-174 落地页三要素 */
+export interface LandingElement {
+  key: 'what' | 'register' | 'retention';
+  title: string;
+  body: string;
+}
+
+export interface LandingPayload {
+  elements: LandingElement[];
+  disclaimer: string;
+  maxClicks: number;
+  guestEntry: string;
+}
+
+/** RQ-173 状态口径自洽（F-102） */
+export interface StatusTruthPayload {
+  entryReady: boolean;
+  ownerState: string | null;
+  contradictions: { code: string; text: string; claimed?: number; actual?: number }[];
+  count: number;
+  ok: boolean;
+  countdown: { daysLeft: number | null; expired: boolean; stale: boolean; text: string };
+  verdict: string;
+}
+
+/** RQ-173~177 阶段零总览 */
+export interface StageZeroPayload {
+  version: string;
+  ready: boolean;
+  gateReady: boolean;
+  items: { rq: string; title: string; ok: boolean; detail: string }[];
+  failed: string[];
+  frozen: string[];
+  truth: StatusTruthPayload;
+  landing: { ok: boolean; missing: string[]; clicks: number; maxClicks: number; guestTrainable: boolean; reasons: string[]; note: string };
+  docs: { ok: boolean; publicUrl: string | null; total: number; offending: string[]; note: string };
+  completion: { ok: boolean; divergent: string[]; falsePositive: number; note: string };
+  verification: { ok: boolean; items: { key: string; label: string; ok: boolean; value: number | null; detail: string }[]; failed: string[]; note: string };
+  rule: string;
+  note: string;
+}
+
 /** RQ-117 达标进度 */
 export interface TierProgressPayload {
   sampleSize: number;

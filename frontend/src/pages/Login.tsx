@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, Tabs, Form, Input, Button, Typography, App, Divider } from 'antd';
 import { useAuth } from '../auth';
 import Forgot from './Forgot';
 import RetentionNoticeCard from '../components/RetentionNoticeCard';
-import { getRetentionNotice } from '../api';
+import LandingHero from '../components/LandingHero';
+import { getRetentionNotice, createGuestSession } from '../api';
 import type { RetentionPayload } from '../types';
 // RQ-51/RQ-72：口径统一取自常量，页面不再写字面量（否则三处必然再度漂移）
 import { DATA_SOURCE_STATEMENT } from '../constants';
@@ -20,6 +22,36 @@ export default function Login() {
   const [forgot, setForgot] = useState(false);
   // RQ-154 保留期承诺：注册页必须可见，文案一律取自后端，前端不复制常量
   const [retention, setRetention] = useState<RetentionPayload | null>(null);
+  const navigate = useNavigate();
+
+  /**
+   * RQ-174「首访 → 训练 ≤2 次点击」中的游客入口。
+   *
+   * 只有一次点击：点「先练一局」→ 建游客会话 → 直接进训练页。
+   * 刻意**不先弹注册框**——注册要求邮箱 + 两次密码，发生在用户还没看到
+   * 任何价值之前，是整个漏斗里最贵的一次交互。
+   */
+  const [guestLoading, setGuestLoading] = useState(false);
+  const onGuestTrain = async () => {
+    setGuestLoading(true);
+    try {
+      const r = await createGuestSession();
+      const token = r.data?.guestToken;
+      if (token) {
+        try {
+          localStorage.setItem('pt_guest_token', token);
+        } catch {
+          /* 隐私模式下写不进，但本次会话仍可用内存中的 token 走完一局 */
+        }
+      }
+      navigate('/blind');
+    } catch {
+      // 游客会话失败时不静默：明确告知，否则用户以为按钮坏了
+      message.error('游客会话创建失败，可直接注册或稍后重试');
+    } finally {
+      setGuestLoading(false);
+    }
+  };
 
   useEffect(() => {
     getRetentionNotice()
@@ -130,6 +162,8 @@ export default function Login() {
       >
         <div style={{ width: '100%', maxWidth: 880, display: 'flex', gap: 32, flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' }}>
           <div className="brand-pitch" style={{ maxWidth: 380, padding: '20px 0' }}>
+            {/* RQ-174 首屏三要素：练什么 / 要不要注册 / 记录留多久，未登录即可见 */}
+            <LandingHero onRegister={() => setForgot(false)} onGuestTrain={onGuestTrain} />
             <Title style={{ color: '#0f766e', marginBottom: 4 }}>赚一个小目标</Title>
             <div style={{ color: '#5f807d', fontSize: 14, letterSpacing: 3, marginBottom: 12 }}>
               模 拟 股 票

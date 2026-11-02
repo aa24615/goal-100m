@@ -313,6 +313,25 @@ export const getGuestSession = () => api.get<import('./types').GuestSessionPaylo
 export const createGuestSession = (guestToken?: string | null) =>
   api.post<import('./types').GuestSessionPayload>('/guest/session', guestToken ? { guestToken } : {});
 
+/* ---------------- v15 阶段零（RQ-173 ~ RQ-177） ---------------- */
+/**
+ * RQ-174 落地页三要素文案：**由后端下发**。
+ *
+ * 前端不复制一份常量，因为「游客每日几局 / 记录保留几天」是会变的运营参数；
+ * 复制必然漂移，而漂移后的承诺比不承诺更有害——用户是按它决定要不要投入时间的。
+ */
+export const getLandingCopy = () => api.get<import('./types').LandingPayload>('/public/landing');
+
+/** RQ-173~177 阶段零总览（?docs=1 附带 README / nginx 的对外化审计） */
+export const getStageZero = (withDocs = false) =>
+  api.get<import('./types').StageZeroPayload>(`/public/stage-zero${withDocs ? '?docs=1' : ''}`);
+
+/** RQ-173 状态口径自洽：入口事实 vs 文档口径（F-102） */
+export const getStatusTruth = () => api.get<import('./types').StatusTruthPayload>('/public/status-truth');
+
+/** RQ-175 面向外部访客的帮助（非部署者视角） */
+export const getVisitorHelp = () => api.get<{ publicUrl: string | null; markdown: string }>('/public/help');
+
 /* ---------------- RQ-125 结算口径说明书 ---------------- */
 /**
  * RQ-150 结算口径说明书（审计层）：回答「为什么是这个价 / 扣了多少费 / 为什么被拒」。

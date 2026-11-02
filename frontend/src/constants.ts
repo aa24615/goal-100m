@@ -252,3 +252,24 @@ export const AVATAR_KEYS = [
   'penguin',
   'crab',
 ] as const;
+
+/* ---------------- v15 阶段零：RQ-174 首屏落地页 ---------------- */
+
+/**
+ * 首屏必须回答的三个问题（RQ-174）。
+ *
+ * 少任何一个，新用户都会带着疑问离开：「这练的是什么？」「要不要先注册？」
+ * 「我练三个月记录会不会没？」。这三个问题过去全部藏在登录之后 ——
+ * 而首屏是**唯一一个未登录用户也能看到**的地方。
+ */
+export const LANDING_ELEMENTS = ['what', 'register', 'retention'] as const;
+export type LandingElementKey = (typeof LANDING_ELEMENTS)[number];
+
+/** RQ-174 验收：首访 → 训练 ≤ 2 次点击 */
+export const MAX_FIRST_VISIT_CLICKS = 2;
+
+/** 首访最短路径的动作序列：进入训练 → 开始一局 */
+export const FIRST_VISIT_PATH: { id: string; label: string; kind: 'click' | 'auto' }[] = [
+  { id: 'enter', label: '进入训练', kind: 'click' },
+  { id: 'start', label: '开始一局', kind: 'click' },
+];

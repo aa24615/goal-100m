@@ -221,12 +221,17 @@ test('P3 · RQ-160 非法日期 / 非法 now 不抛错，且保留原值便于�
   assert.ok(['ok', 'due-soon', 'overdue'].includes(o2.state));
 });
 
-test('P5 · RQ-160 纯日期截止日按上海时区当天末尾计算，不因 UTC 差一天', () => {
-  // now = 上海 11-02 23:00：按「当天 23:59:59 +08」算还有 1 小时，不该逾期；
-  // 若按 UTC 午夜解析（= 上海 08:00），此时已过去 15 小时，会被误判逾期。
+test('P5 · RQ-160 纯日期截止日按上海时区自然日计算，不因 UTC 差一天', () => {
+  // v15 口径变更：剩余天数改为**自然日差**（与 stageZeroService.countdownOf 同源），
+  // 不再是「截止日 23:59:59 时戳差取整」——后者同一天早晚算出的值会差 1 天，
+  // 正是 README 写出「剩余 15 天」而实际 13 天的成因（F-102）。
+  //
+  // 本用例要守的不变量没变：**截止日当天不得判为逾期**。
+  // now = 上海 11-02 23:00，截止日 11-02 → 自然日差 0 → 未逾期。
   const o = ownerState({ owner: 'a', deadline: '2026-11-02', now: new Date('2026-11-02T23:00:00+08:00') });
   assert.equal(o.state, 'due-soon', '当天未过完不得判为逾期');
-  assert.equal(o.daysLeft > 0, true);
+  assert.equal(o.daysLeft, 0, '自然日口径下截止日当天为 0 天');
+  assert.equal(o.blocked, false);
   assert.equal(DEADLINE_WARN_DAYS, 3);
   // 同一个截止日在次日同一时刻确实已逾期，证明判据本身有效（不是恒为 due-soon）
   assert.equal(ownerState({ owner: 'a', deadline: '2026-11-02', now: new Date('2026-11-04T00:00:00+08:00') }).state, 'overdue');
@@ -895,10 +900,15 @@ test('P0 · RQ-158/160 runVerify 在无外部环境下仍返回 8 项结果且�
     existsFn: () => false,
     listFn: () => [],
   });
-  assert.equal(report.results.length, 8, 'v13 的两项必须真的出现在结果里');
+  // 不写死总数：每新增一项发布验证就要改一次数字，而数字本身不表达意图。
+  // 断言「v13 的两项必须真的出现」+「v15 的阶段零两项也在」，才是这条用例真正的意思。
+  assert.ok(report.results.length >= 8, 'v13 的两项必须真的出现在结果里');
   const names = report.results.map((r) => r.name);
   assert.ok(names.includes('telemetry-consistency'));
   assert.ok(names.includes('verification-record'));
+  // v15 阶段零：RQ-173~177 上线后断言
+  assert.ok(names.includes('stage-zero'), '阶段零总览必须进入发布验证');
+  assert.ok(names.includes('status-truth'), 'RQ-173 状态口径自洽必须进入发布验证');
   for (const r of report.results) {
     assert.ok(r.name && r.detail, `${r.name} 必须有名称与说明`);
     assert.equal(typeof r.ok, 'boolean');

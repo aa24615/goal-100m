@@ -24,6 +24,10 @@
  */
 
 import { auditPublicEntrypoint, normalizeBaseUrl, hostOf, isLocalHost, renderNginxServerConf } from './publicAccessService.js';
+// v15：剩余天数统一走 stageZeroService 的自然日口径。
+// 此前 ownerState 用「截止日 23:59:59 时戳差取整」，同一天早晚算出的值会差 1 天，
+// 与文档里写死的数字永远对不上；两处各算一套正是 F-102（口径与事实不符）的同类问题。
+import { countdownOf } from './stageZeroService.js';
 
 /** RQ-160：责任人公钥——没有 owner 的需求等于没有排期 */
 export const OWNER_ENV_KEYS = {
@@ -119,8 +123,7 @@ export function ownerState(o = {}) {
   let daysLeft = null;
   let state = 'none';
   if (owner && deadline) {
-    const ms = deadline.getTime() - now.getTime();
-    daysLeft = Math.ceil(ms / 86400000);
+    daysLeft = countdownOf({ deadline: deadlineRaw, now }).daysLeft;
     state = daysLeft < 0 ? 'overdue' : daysLeft <= DEADLINE_WARN_DAYS ? 'due-soon' : 'ok';
   } else if (owner) {
     state = 'no-deadline';

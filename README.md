@@ -145,13 +145,22 @@ cd backend && node src/scripts/verifyRelease.js --json
 
 ## 公网入口
 
-- **对外唯一入口**：*未配置*。当前只能在部署机本机用 `http://localhost:8080` 访问。
+- **对外唯一入口**：*未配置*（RQ-173，连续第六版未完成）。当前只能在部署机本机用 `http://localhost:8080` 访问，
+  下文所有 `localhost` 地址**仅适用于本地开发**，不是给外部用户的入口。
+- **配置方式**：`PUBLIC_BASE_URL=https://<域名>`（写入仓库根 `.env`，compose 已声明透传），
+  随后 `node backend/src/scripts/provisionPublicEntry.js --domain=<域名> --owner=<责任人> --deadline=YYYY-MM-DD --apply`
+  可一键生成 nginx + 证书 + .env 的落地计划。
 
 | 项 | 值 |
 |---|---|
 | 责任人（RQ-160） | `zyan` |
 | 截止日（RQ-160） | `2026-11-16` |
-| 状态 | ok —— owner 与截止日均已指定，剩余 15 天。 |
+| 状态 | **未就绪** —— 对外地址未配置。owner 与截止日已指定，但「已指定责任人」**不等于**「入口已可用」（F-102）。 |
+| 剩余天数 | 由 `GET /api/public/status-truth` 按当前日期计算，**不在文档里写死**（写死的数字两周后即为假信息）。 |
+
+> 说明：此处过去曾写「状态 ok —— owner 与截止日均已指定，剩余 15 天」，
+> 与同段上方「对外唯一入口：未配置」互相矛盾，会把「责任已指定」误读为「入口已可用」，
+> 是连续多版顺延的掩盖机制。现按 RQ-173 验收口径改为如实标注。
 
 上线后 10 分钟内必须执行 `DATABASE_URL=... node src/scripts/verifyRelease.js`，
 并把结果贴到本次发布的提交说明里；连续两次发布无验证记录即视为流程失效（RQ-160）。
