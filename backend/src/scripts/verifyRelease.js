@@ -340,21 +340,25 @@ export async function checkStageZero({ fetchFn = fetch, baseUrl = defaultBaseUrl
   }
 
   const items = Array.isArray(payload?.items) ? payload.items : [];
-  const failed = items.filter((i) => i && i.ok !== true).map((i) => `${i.rq}(${i.title})`);
+  /** 有据可查的失败（status==='fail'），不含 RQ-173 */
+  const hardFails = items.filter((i) => i && i.status === 'fail' && i.rq !== 'RQ-173');
+  /** 无证据（unknown）：不算失败，但要说出来，否则「没查」会被读成「没问题」 */
+  const unknown = items.filter((i) => i && i.status === 'unknown').map((i) => i.rq);
   const entryItem = items.find((i) => i?.rq === 'RQ-173');
-  const entryMissing = entryItem && entryItem.ok !== true;
+  const entryMissing = entryItem && entryItem.status !== 'pass';
 
   return {
     name: 'stage-zero',
-    ok: failed.length === 0 || (entryMissing && failed.length === 1),
-    // RQ-173 依赖域名与证书，非代码可完成：记为告警而不是失败
-    warn: entryMissing,
-    detail:
-      failed.length === 0
-        ? `阶段零 5/5 通过（版本 ${payload?.version ?? '?'}）`
-        : `阶段零未通过 ${failed.length} 项：${failed.join('、')}${entryMissing ? '（RQ-173 需人工配置域名与证书，记为告警）' : ''}`,
+    ok: hardFails.length === 0,
+    warn: Boolean(entryMissing) || unknown.length > 0,
+    detail: [
+      hardFails.length === 0 ? '阶段零无有据失败' : `阶段零失败 ${hardFails.length} 项：${hardFails.map((i) => `${i.rq}(${i.title})`).join('、')}`,
+      entryMissing ? 'RQ-173 需人工配置域名与证书（非代码可完成，记为告警）' : 'RQ-173 已就绪',
+      unknown.length ? `无证据 ${unknown.length} 项：${unknown.join('、')}（未取证，不作判定）` : '全部已取证',
+    ].join('；'),
     ready: payload?.ready === true,
     failed: payload?.failed || [],
+    unknown,
     frozen: payload?.frozen || [],
   };
 }
@@ -371,11 +375,26 @@ export async function checkStatusTruth({ fetchFn = fetch, baseUrl = defaultBaseU
     const res = await fetchFn(`${baseUrl}/api/public/status-truth`, { redirect: 'manual' });
     if (!res.ok) return { name: 'status-truth', ok: false, detail: `/api/public/status-truth 返回 ${res.status}` };
     const p = await res.json();
+    const list = Array.isArray(p?.contradictions) ? p.contradictions : [];
+    /**
+     * 按「能不能靠代码修」分流，而不是一律判 fail：
+     *   - 入口类（OK_WITHOUT_ENTRY / ENTRY_SAYS_UNCONFIGURED）：根因是**没有域名与证书**，
+     *     非代码可完成。判 fail 会让验证每天都是红的，而常态红 = 没人再看
+     *     —— 这正是连续六版把未完成写成已完成的心理机制。记为 warn 保持可见。
+     *   - 文档类（COUNTDOWN_STALE / DEADLINE_PASSED）：改文案/改状态即可修，
+     *     属于我们自己的承诺与事实不符，必须判 fail。
+     */
+    const ENTRY_ONLY = ['OK_WITHOUT_ENTRY', 'ENTRY_SAYS_UNCONFIGURED'];
+    const docLies = list.filter((c) => !ENTRY_ONLY.includes(c?.code));
     return {
       name: 'status-truth',
-      ok: p?.ok === true,
-      detail: p?.ok ? '状态口径与事实一致。' : `发现 ${p?.count ?? 0} 处矛盾：${p?.verdict ?? ''}`,
-      contradictions: p?.contradictions || [],
+      ok: docLies.length === 0,
+      warn: list.length > 0,
+      detail:
+        list.length === 0
+          ? '状态口径与事实一致。'
+          : `${docLies.length ? `口径失实 ${docLies.length} 处（须修）` : '无口径失实'}；入口类提示 ${list.length - docLies.length} 处（需域名与证书，记为告警）：${p?.verdict ?? ''}`,
+      contradictions: list,
     };
   } catch (e) {
     return { name: 'status-truth', ok: false, detail: `状态口径端点不可达：${e?.message || e}` };

@@ -518,6 +518,63 @@ export function isEffectiveCompletion(o = {}) {
 }
 
 /**
+ * 扫描真实源码：全站「完成数」读数是否都走有效完成口径（纯函数）。
+ *
+ * 与 `auditCompletionConsistency` 的分工：
+ *   前者判定**别人上报的口径声明**，本函数直接从源码里找证据。
+ * 两者缺一不可——只信声明等于自己给自己发通行证（v13 scanMissingTestFilter 的教训）。
+ *
+ * @param {Array<{name:string, text:string}>} files
+ * @returns {{ok:boolean, evidence:Array, unverified:string[], note:string}}
+ */
+export function scanCompletionCaliber(files) {
+  const list = Array.isArray(files) ? files : [];
+
+  /** 每个站点的判定依据：命中任一「有效口径」特征即视为已收口 */
+  const PROBES = {
+    funnel: [/effective_completed/i, /effectiveCompletion/i, /effective_completed\s*=\s*true/i],
+    northStar: [/effective_completed/i, /effectiveCompletion/i, /firstTrainingEffectiveRate/i],
+    telemetry: [/allowFinishTelemetry/i, /effectiveCompletion/i, /effective_completed/i],
+    scoreCard: [/effective_completed/i, /effectiveCompletion/i, /effectiveCompleted/i],
+  };
+  /** 每类读数对应的源码文件（按文件名匹配） */
+  const FILE_OF = {
+    funnel: /trainingFunnelService|growth\.js|firstTrainingService/,
+    northStar: /northStarService/,
+    telemetry: /telemetryIntegrityService|analyticsService|routes\/blind\.js/,
+    scoreCard: /scoreCardService|checkupService/,
+  };
+
+  const evidence = [];
+  const unverified = [];
+  for (const site of COMPLETION_SITES) {
+    const key = site.key;
+    const probes = PROBES[key] || [];
+    const fileRe = FILE_OF[key];
+    const hit = list.find((f) => {
+      const name = String(obj(f).name || '');
+      if (!fileRe || !fileRe.test(name)) return false;
+      return probes.some((re) => re.test(String(obj(f).text || '')));
+    });
+    if (hit) evidence.push({ key, file: obj(hit).name });
+    else unverified.push(key);
+  }
+
+  return {
+    ok: unverified.length === 0,
+    evidence,
+    unverified,
+    scanned: list.length,
+    note:
+      unverified.length === 0
+        ? `${COMPLETION_SITES.length} 处完成读数在源码中均已采用有效完成口径。`
+        : list.length === 0
+          ? '未提供源码：无证据，不作判定（避免凭空报红）。'
+          : `未在源码中找到有效完成口径：${unverified.join('、')}。`,
+  };
+}
+
+/**
  * 全站口径一致性审计（纯函数）。
  *
  * @param {object} o { sites: {funnel:{effective:boolean}, ...} }
@@ -643,6 +700,87 @@ export function stageZeroVerification(o = {}) {
 }
 
 /* ================================================================== *
+ * 五·补 RQ-177 的真实取证（queryFn 注入，便于无库单测）                  *
+ * ================================================================== */
+
+/** 单会话内同一事件重复上报的上限：>1 即为重复 */
+export const DEDUPE_SQL = `
+  SELECT COUNT(*)::int AS c FROM (
+    SELECT NULLIF(payload->>'sessionId','')::int AS sid, event, COUNT(*) AS n
+      FROM analytics_events
+     WHERE event = 'blind_resume'
+       AND created_at >= now() - ($1 || ' days')::interval
+       AND COALESCE(is_test, false) = false
+     GROUP BY 1, 2
+    HAVING COUNT(*) > 1
+  ) d`;
+
+/** 自测流量占比：分子分母都要，只有占比才能判断「看板是否被污染」 */
+export const ISOLATION_SQL = `
+  SELECT COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE COALESCE(is_test, false))::int AS test_rows
+    FROM analytics_events
+   WHERE created_at >= now() - ($1 || ' days')::interval`;
+
+/**
+ * 采集 RQ-177 四项闸门的**真实读数**。
+ *
+ * 为什么单独做一层取数而不是让路由直接拼 SQL：
+ * SQL 是本模块最需要被单测、又最难被单测的部分（v10 的两个阻断级缺陷都在 SQL 层）。
+ * `queryFn` 注入后可以脱离数据库验证「取数失败时如何降级」。
+ *
+ * 取数失败一律 `null`（unknown），**不返回 0**：
+ * 「查不到」与「查到是 0」是两回事，把前者报成后者就是制造假绿。
+ */
+export async function collectVerificationEvidence({ queryFn = null, days = 30, consistency = null, streak = null } = {}) {
+  if (!queryFn) return { ok: false, evidence: null, reason: '未提供 queryFn' };
+
+  let duplicates = null;
+  try {
+    const { rows } = await queryFn(DEDUPE_SQL, [String(days)]);
+    duplicates = rows[0]?.c ?? null;
+  } catch {
+    duplicates = null;
+  }
+
+  let isolation = { ok: false, isTestCoverage: null, note: '自测流量读数不可得' };
+  try {
+    const { rows } = await queryFn(ISOLATION_SQL, [String(days)]);
+    const total = rows[0]?.total ?? null;
+    const testRows = rows[0]?.test_rows ?? null;
+    if (total !== null) {
+      isolation = {
+        ok: testRows !== null && total > 0 && testRows < total,
+        isTestCoverage: total > 0 ? Number((testRows / total).toFixed(4)) : null,
+        total,
+        testRows,
+        note:
+          total === 0
+            ? '窗口内无埋点：无法判断隔离是否生效。'
+            : `窗口内 ${testRows}/${total} 条为自测流量（${((testRows / total) * 100).toFixed(1)}%）。`,
+      };
+    }
+  } catch {
+    /* 保持 null 口径 */
+  }
+
+  const con = consistency && typeof consistency === 'object' ? consistency : null;
+  const st = streak && typeof streak === 'object' ? streak : null;
+
+  return {
+    ok: true,
+    evidence: {
+      dedupe: { duplicates },
+      isolation,
+      consistency: con
+        ? { orphanEvents: con.orphanEvents ?? null, missingEvents: con.missingEvents ?? null, diff: con.diff ?? null, ok: con.ok === true }
+        : null,
+      streak: st ? { streak: st.streak ?? null, required: st.required ?? 2, ok: st.ok === true } : null,
+    },
+  };
+}
+
+/* ================================================================== *
  * 六、阶段零总览                                                       *
  * ================================================================== */
 
@@ -658,29 +796,64 @@ export function auditStageZero(o = {}) {
   const entry = obj(src.entry);
   const landing = src.landing && typeof src.landing === 'object' ? src.landing : auditLanding(src.landingInput);
   const docs = src.docs && typeof src.docs === 'object' ? src.docs : auditDocsPublicness(src.docsInput?.docs, src.docsInput);
-  const completion = src.completion && typeof src.completion === 'object' ? src.completion : auditCompletionConsistency(src.completionInput);
-  const verification = src.verification && typeof src.verification === 'object' ? src.verification : stageZeroVerification(src.verificationInput);
+  const completion = src.completion && typeof src.completion === 'object' ? src.completion : null;
+  const verification = src.verification && typeof src.verification === 'object' ? src.verification : null;
   const truth =
     src.truth && typeof src.truth === 'object' ? src.truth : statusTruthfulness({ entryReady: entry.ready === true, owner: src.owner, readmeText: src.readmeText, now: src.now });
 
-  const items = [
-    { rq: 'RQ-173', title: '对外地址与 HTTPS', ok: entry.ready === true && truth.ok, detail: entry.ready ? truth.verdict : (entry.nextAction || '对外入口未配置') },
-    { rq: 'RQ-174', title: '首屏落地页与最短路径', ok: landing.ok === true, detail: landing.note },
-    { rq: 'RQ-175', title: '文档对外化', ok: docs.ok === true, detail: docs.note },
-    { rq: 'RQ-176', title: '有效完成全站一致', ok: completion.ok === true, detail: completion.note },
-    { rq: 'RQ-177', title: '度量闸门', ok: verification.ok === true, detail: verification.note },
+  /**
+   * 三态判定：`pass` / `fail` / `unknown`。
+   *
+   * 为什么必须有 unknown：RQ-176 / 177 的证据来自**源码扫描与数据库查询**，
+   * 端点拿不到时若一律按「未通过」处理，就会得到一条永远为红、
+   * 且没人能修的告警——**凭空报红与凭空报绿是同一类缺陷**（F-102 的两面）。
+   * 只有真凭实据的失败才进 `failed`；缺证据的进 `unknown`，由调用方决定是否补证。
+   */
+  const rawItems = [
+    {
+      rq: 'RQ-173',
+      title: '对外地址与 HTTPS',
+      // 入口是否就绪是**事实**（可查），因此这一项永远有证据
+      verdict: entry.ready === true && truth.ok,
+      detail: entry.ready ? truth.verdict : (entry.nextAction || '对外入口未配置'),
+    },
+    { rq: 'RQ-174', title: '首屏落地页与最短路径', verdict: landing.ok === true, detail: landing.note },
+    { rq: 'RQ-175', title: '文档对外化', verdict: docs.ok === true, detail: docs.note },
+    {
+      rq: 'RQ-176',
+      title: '有效完成全站一致',
+      verdict: completion ? completion.ok === true : null,
+      detail: completion ? completion.note : '未提供源码或声明：无证据，不作判定。',
+    },
+    {
+      rq: 'RQ-177',
+      title: '度量闸门',
+      verdict: verification ? verification.ok === true : null,
+      detail: verification ? verification.note : '未提供去重/隔离/对账/留痕读数：无证据，不作判定。',
+    },
   ];
 
-  const failed = items.filter((i) => !i.ok).map((i) => i.rq);
+  const items = rawItems.map((i) => ({
+    rq: i.rq,
+    title: i.title,
+    ok: i.verdict === true,
+    status: i.verdict === true ? 'pass' : i.verdict === false ? 'fail' : 'unknown',
+    detail: i.detail,
+  }));
+
+  const failed = items.filter((i) => i.status === 'fail').map((i) => i.rq);
+  const unknown = items.filter((i) => i.status === 'unknown').map((i) => i.rq);
   const gateReady = entry.ready === true;
   const frozen = gateReady ? [] : FROZEN_RQS_V15;
 
   return {
     version: 'v15',
+    // ready = 无任何「有据可查的失败」；unknown 不算通过，但也不阻塞
     ready: failed.length === 0,
     gateReady,
     items,
     failed,
+    unknown,
     frozen,
     truth,
     landing,
@@ -720,9 +893,13 @@ export default {
   EFFECTIVE_FLOOR,
   isEffectiveCompletion,
   auditCompletionConsistency,
+  scanCompletionCaliber,
   // RQ-177
   STAGE_ZERO_GATES,
   stageZeroVerification,
+  DEDUPE_SQL,
+  ISOLATION_SQL,
+  collectVerificationEvidence,
   // 总览
   auditStageZero,
 };

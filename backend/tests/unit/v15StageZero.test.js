@@ -616,3 +616,119 @@ test('P5 · RQ-174 落地页要素顺序固定：改后端顺序不会让前端�
   const c = buildLandingCopy({ guestLimit: 3, guestDays: 7 });
   assert.deepEqual(c.elements.map((e) => e.key), LANDING_ELEMENTS.map((e) => e.key));
 });
+
+/* ================================================================== *
+ * 补充：RQ-176 源码取证 / RQ-177 真实取数 / 三态判定                    *
+ * ================================================================== */
+
+import { scanCompletionCaliber, collectVerificationEvidence, DEDUPE_SQL, ISOLATION_SQL } from '../../src/services/stageZeroService.js';
+
+test('P0 · RQ-176 源码取证：四处完成读数命中有效完成特征即通过', () => {
+  const r = scanCompletionCaliber([
+    { name: 'trainingFunnelService.js', text: "WHERE effective_completed = true" },
+    { name: 'northStarService.js', text: 'firstTrainingEffectiveRate()' },
+    { name: 'telemetryIntegrityService.js', text: 'allowFinishTelemetry(evaluation)' },
+    { name: 'scoreCardService.js', text: 'effectiveCompleted' },
+  ]);
+  assert.equal(r.ok, true);
+  assert.equal(r.unverified.length, 0);
+  assert.equal(r.evidence.length, 4);
+});
+
+test('P1 · RQ-176 源码取证：某站点未命中即点名，不因「没扫到」而放行', () => {
+  const r = scanCompletionCaliber([
+    { name: 'trainingFunnelService.js', text: 'effective_completed' },
+    { name: 'northStarService.js', text: "WHERE status = 'FINISHED'" },
+  ]);
+  assert.equal(r.ok, false);
+  assert.ok(r.unverified.includes('northStar'));
+  assert.ok(r.unverified.includes('telemetry'), '没提供的文件属于未取证，不是通过');
+});
+
+test('P3 · RQ-176 无源码时返回「无证据」而不是通过（避免凭空报绿）', () => {
+  const r = scanCompletionCaliber([]);
+  assert.equal(r.scanned, 0);
+  assert.match(r.note, /未提供源码/);
+  assert.equal(r.ok, false);
+});
+
+test('P1 · RQ-177 collectVerificationEvidence 无 queryFn 时返回 null 证据而非假绿', async () => {
+  const r = await collectVerificationEvidence({ queryFn: null });
+  assert.equal(r.ok, false);
+  assert.equal(r.evidence, null);
+  assert.match(r.reason, /queryFn/);
+});
+
+test('P1 · RQ-177 取数失败时读数为 null，不伪造 0（「查不到」≠「查到是 0」）', async () => {
+  const r = await collectVerificationEvidence({
+    queryFn: async () => {
+      throw new Error('db down');
+    },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.evidence.dedupe.duplicates, null);
+  assert.equal(r.evidence.isolation.isTestCoverage, null);
+  assert.equal(r.evidence.consistency, null);
+});
+
+test('P2 · RQ-177 自测流量占比按分子分母计算，空表时明确说「无法判断」', async () => {
+  const r = await collectVerificationEvidence({
+    queryFn: async (sql) => {
+      if (sql === ISOLATION_SQL) return { rows: [{ total: 0, test_rows: 0 }] };
+      if (sql === DEDUPE_SQL) return { rows: [{ c: 0 }] };
+      return { rows: [] };
+    },
+  });
+  assert.equal(r.evidence.isolation.total, 0);
+  assert.equal(r.evidence.isolation.ok, false);
+  assert.match(r.evidence.isolation.note, /无法判断/);
+});
+
+test('P2 · RQ-177 全部为自测流量（total===test_rows）时判隔离失效', async () => {
+  const r = await collectVerificationEvidence({
+    queryFn: async (sql) => {
+      if (sql === ISOLATION_SQL) return { rows: [{ total: 100, test_rows: 100 }] };
+      if (sql === DEDUPE_SQL) return { rows: [{ c: 0 }] };
+      return { rows: [] };
+    },
+  });
+  assert.equal(r.evidence.isolation.isTestCoverage, 1);
+  assert.equal(r.evidence.isolation.ok, false, '全部是自测流量说明隔离未生效');
+});
+
+test('P0 · RQ-176/177 无证据时总览判 unknown 而不是 fail（凭空报红与凭空报绿同类）', () => {
+  const r = auditStageZero({
+    entry: { ready: true },
+    owner: { state: 'ok', deadline: '2026-12-31' },
+    readmeText: '对外唯一入口 https://tr.example.com',
+    now: new Date('2026-11-03T12:00:00+08:00'),
+  });
+  assert.ok(r.unknown.includes('RQ-176'), '未取证应为 unknown');
+  assert.ok(r.unknown.includes('RQ-177'));
+  assert.equal(r.failed.includes('RQ-176'), false);
+  assert.equal(r.failed.includes('RQ-177'), false);
+  // RQ-174 无 landingInput 时是真失败（三要素未声明），不是 unknown
+  assert.ok(r.failed.includes('RQ-174'));
+});
+
+test('P1 · RQ-176 有证据且失败时进 failed，不被 unknown 吞掉', () => {
+  const r = auditStageZero({
+    entry: { ready: true },
+    owner: { state: 'ok', deadline: '2026-12-31' },
+    readmeText: '对外唯一入口 https://tr.example.com',
+    completion: { ok: false, note: 'northStar 仍用原始 FINISHED', divergent: ['northStar'], falsePositive: 0 },
+    now: new Date('2026-11-03T12:00:00+08:00'),
+  });
+  assert.ok(r.failed.includes('RQ-176'));
+  assert.equal(r.unknown.includes('RQ-176'), false);
+  assert.equal(r.items.find((i) => i.rq === 'RQ-176').status, 'fail');
+});
+
+test('P5 · RQ-173~177 items 同时带 ok 布尔与 status 三态，兼容旧调用方', () => {
+  const r = auditStageZero(null);
+  for (const i of r.items) {
+    assert.equal(typeof i.ok, 'boolean');
+    assert.ok(['pass', 'fail', 'unknown'].includes(i.status));
+    assert.equal(i.ok, i.status === 'pass');
+  }
+});

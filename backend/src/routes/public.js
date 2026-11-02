@@ -32,8 +32,12 @@ import {
   auditDocsPublicness,
   renderVisitorHelp,
   rewriteDocForPublic,
+  scanCompletionCaliber,
+  collectVerificationEvidence,
+  stageZeroVerification,
   FROZEN_RQS_V15,
 } from '../services/stageZeroService.js';
+import { collectSourceFiles } from '../services/testIsolationService.js';
 
 const router = express.Router();
 
@@ -178,47 +182,85 @@ router.get('/public/gate', (req, res) => {
  * 支持 `?docs=1` 附带仓库三份文档（.env / nginx / README）的对外化审计结果，
  * 默认关闭：文档读取有 IO 成本，而自检高频调用时并不需要每次都扫。
  */
-router.get('/public/stage-zero', (req, res) => {
-  const a = resolvePublicAccess(process.env);
-  const texts = repoTexts();
-  const env = envMap(texts.envText);
-  const own = ownerState({
-    owner: env.PUBLIC_ENTRY_OWNER || process.env.PUBLIC_ENTRY_OWNER,
-    deadline: env.PUBLIC_ENTRY_DEADLINE || process.env.PUBLIC_ENTRY_DEADLINE,
-  });
+router.get(
+  '/public/stage-zero',
+  asyncHandler(async (req, res) => {
+    const a = resolvePublicAccess(process.env);
+    const texts = repoTexts();
+    const env = envMap(texts.envText);
+    const own = ownerState({
+      owner: env.PUBLIC_ENTRY_OWNER || process.env.PUBLIC_ENTRY_OWNER,
+      deadline: env.PUBLIC_ENTRY_DEADLINE || process.env.PUBLIC_ENTRY_DEADLINE,
+    });
 
-  const withDocs = String(req.query?.docs || '').trim() === '1';
-  const docsInput = withDocs
-    ? {
-        publicUrl: a.publicUrl,
-        docs: [
-          { name: 'README.md', text: texts.readmeText },
-          { name: 'frontend/nginx.conf', text: texts.nginxText },
-        ].filter((d) => String(d.text || '').length > 0),
+    const withDocs = String(req.query?.docs || '').trim() === '1';
+    const docsInput = withDocs
+      ? {
+          publicUrl: a.publicUrl,
+          docs: [
+            { name: 'README.md', text: texts.readmeText },
+            { name: 'frontend/nginx.conf', text: texts.nginxText },
+          ].filter((d) => String(d.text || '').length > 0),
+        }
+      : { publicUrl: a.publicUrl, docs: [] };
+
+    /**
+     * RQ-176 / 177 的证据必须**现取**，不能靠声明：
+     * 前者扫真实源码（看完成读数是不是真用了 effective_completed），
+     * 后者查真实库（去重 / 隔离 / 对账 / 留痕）。
+     * 取不到时留 null → 总览判 unknown，而不是凭空报红（v13 的教训）。
+     */
+    let completion = null;
+    try {
+      const files = await collectSourceFiles({ root: resolve(dirname(fileURLToPath(import.meta.url)), '..'), dirs: ['services', 'routes', 'scripts'] });
+      const scan = scanCompletionCaliber(files);
+      if (scan.scanned > 0) {
+        completion = {
+          ok: scan.ok,
+          note: scan.note,
+          evidence: scan.evidence,
+          unverified: scan.unverified,
+          divergent: scan.unverified,
+          falsePositive: 0,
+        };
       }
-    : { publicUrl: a.publicUrl, docs: [] };
+    } catch {
+      completion = null;
+    }
 
-  const report = auditStageZero({
-    entry: { ready: a.ready, nextAction: a.nextAction, publicUrl: a.publicUrl },
-    owner: own,
-    readmeText: texts.readmeText,
-    docsInput,
-    // 首屏路径与游客能力由前端常量保证，后端此处给出的是**验收口径**而非实时探测
-    landingInput: {
-      elements: ['what', 'register', 'retention'],
-      path: [{ id: 'enter', label: '进入训练', kind: 'click' }, { id: 'start', label: '开始一局', kind: 'click' }],
-      guestTrainable: true,
-    },
-  });
+    let verification = null;
+    try {
+      const ev = await collectVerificationEvidence({ queryFn: pool.query.bind(pool), days: 30 });
+      if (ev.ok && ev.evidence) verification = stageZeroVerification(ev.evidence);
+    } catch {
+      verification = null;
+    }
 
-  res.json({
-    ...report,
-    publicUrl: a.publicUrl,
-    owner: own,
-    frozenV13: FROZEN_RQS,
-    hint: '?docs=1 可附带 README / nginx 的对外化审计',
-  });
-});
+    const report = auditStageZero({
+      entry: { ready: a.ready, nextAction: a.nextAction, publicUrl: a.publicUrl },
+      owner: own,
+      readmeText: texts.readmeText,
+      docsInput,
+      completion,
+      verification,
+      // 首屏路径与游客能力由前端常量保证，后端此处给出的是**验收口径**而非实时探测
+      landingInput: {
+        elements: ['what', 'register', 'retention'],
+        path: [{ id: 'enter', label: '进入训练', kind: 'click' }, { id: 'start', label: '开始一局', kind: 'click' }],
+        guestTrainable: true,
+      },
+    });
+
+    res.json({
+      ...report,
+      publicUrl: a.publicUrl,
+      owner: own,
+      frozenV13: FROZEN_RQS,
+      evidence: { completion: completion !== null, verification: verification !== null },
+      hint: '?docs=1 可附带 README / nginx 的对外化审计',
+    });
+  })
+);
 
 /**
  * RQ-173 状态口径自洽：入口事实 vs 文档口径。
