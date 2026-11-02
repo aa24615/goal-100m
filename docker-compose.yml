@@ -1,7 +1,11 @@
 services:
   db:
     image: postgres:15-alpine
-    restart: unless-stopped
+    # 2026-11-03 修复：原先 unless-stopped 在 Docker Desktop 关闭/重启后不会自动拉起
+    # （容器收到 SIGTERM → installProcessGuards 优雅退出 0，Desktop 将其记为「已停止」），
+    # 实测 11-02 21:09 起生产停摆约 4 小时、11-03 全天无 app 日志。改为 always：
+    # daemon 恢复后无条件拉起，避免把「服务没在跑」误读成「日志干净无异常」。
+    restart: always
     environment:
       POSTGRES_USER: papertrade
       POSTGRES_PASSWORD: papertrade
@@ -19,7 +23,7 @@ services:
 
   backend:
     build: ./backend
-    restart: unless-stopped
+    restart: always
     depends_on:
       db:
         condition: service_healthy
@@ -70,7 +74,7 @@ services:
 
   frontend:
     build: ./frontend
-    restart: unless-stopped
+    restart: always
     depends_on:
       - backend
     ports:
