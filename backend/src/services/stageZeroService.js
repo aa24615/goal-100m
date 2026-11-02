@@ -552,11 +552,12 @@ export function scanCompletionCaliber(files) {
     const probes = PROBES[key] || [];
     const fileRe = FILE_OF[key];
     const hit = list.find((f) => {
-      const name = String(obj(f).name || '');
+      // 兼容两种来源：`collectSourceFiles` 给的是 path，调用方自造的可能是 name
+      const name = String(obj(f).name || obj(f).path || '');
       if (!fileRe || !fileRe.test(name)) return false;
       return probes.some((re) => re.test(String(obj(f).text || '')));
     });
-    if (hit) evidence.push({ key, file: obj(hit).name });
+    if (hit) evidence.push({ key, file: obj(hit).name || obj(hit).path });
     else unverified.push(key);
   }
 

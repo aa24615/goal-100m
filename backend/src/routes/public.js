@@ -1,7 +1,7 @@
 // 公网可达性自检与游客会话（RQ-121 规范端点 / RQ-122 公网入口 / RQ-108 免登录练一次）
 
 import express from 'express';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pool from '../db.js';
@@ -212,7 +212,15 @@ router.get(
      */
     let completion = null;
     try {
-      const files = await collectSourceFiles({ root: resolve(dirname(fileURLToPath(import.meta.url)), '..'), dirs: ['services', 'routes', 'scripts'] });
+      // collectSourceFiles 是纯函数，fs 依赖必须显式注入（不注入会静默返回 []，
+      // 于是「扫了但什么都没扫到」——比不扫更危险，因为它长得像「没找到违规」）
+      const files = await collectSourceFiles({
+        root: resolve(dirname(fileURLToPath(import.meta.url)), '..'),
+        dirs: ['services', 'routes', 'scripts'],
+        readFn: (p, enc) => readFileSync(p, enc),
+        readdirFn: (p) => readdirSync(p),
+        joinFn: (a, b) => join(a, b),
+      });
       const scan = scanCompletionCaliber(files);
       if (scan.scanned > 0) {
         completion = {
