@@ -50,10 +50,15 @@ export async function acquisition({ days = 30 } = {}) {
          JOIN blind_sessions s ON s.id = d.session_id
         GROUP BY s.user_id
      ),
+     -- RQ-176：完成口径必须是**有效完成**。
+     -- 原写法 finished_at IS NOT NULL 会把 0 笔成交 / 0 秒的空跑也记成「完成过首训」，
+     -- 于是北极星被自己人刷满（v13 实测 session 324 耗时 0.135 秒也曾被计入）。
+     -- 这里改为只认 effective_completed = TRUE（由 routes/blind.js 结算时落库）。
      first_fin AS (
        SELECT user_id, MIN(finished_at) AS finished_at
          FROM blind_sessions
         WHERE finished_at IS NOT NULL
+          AND effective_completed = TRUE
         GROUP BY user_id
      )
      SELECT u.id AS user_id,

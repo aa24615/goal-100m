@@ -674,7 +674,7 @@ test('P1 · RQ-177 取数失败时读数为 null，不伪造 0（「查不到」
 test('P2 · RQ-177 自测流量占比按分子分母计算，空表时明确说「无法判断」', async () => {
   const r = await collectVerificationEvidence({
     queryFn: async (sql) => {
-      if (sql === ISOLATION_SQL) return { rows: [{ total: 0, test_rows: 0 }] };
+      if (sql === ISOLATION_SQL()) return { rows: [{ total: 0, test_rows: 0 }] };
       if (sql === DEDUPE_SQL) return { rows: [{ c: 0 }] };
       return { rows: [] };
     },
@@ -687,7 +687,7 @@ test('P2 · RQ-177 自测流量占比按分子分母计算，空表时明确说�
 test('P2 · RQ-177 全部为自测流量（total===test_rows）时判隔离失效', async () => {
   const r = await collectVerificationEvidence({
     queryFn: async (sql) => {
-      if (sql === ISOLATION_SQL) return { rows: [{ total: 100, test_rows: 100 }] };
+      if (sql === ISOLATION_SQL()) return { rows: [{ total: 100, test_rows: 100 }] };
       if (sql === DEDUPE_SQL) return { rows: [{ c: 0 }] };
       return { rows: [] };
     },

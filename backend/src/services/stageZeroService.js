@@ -30,6 +30,15 @@
  * 公共小工具                                                          *
  * ------------------------------------------------------------------ */
 
+/**
+ * 埋点口径只需一份声明，从 testIsolationService 复用而不是再写一遍。
+ *
+ * 缺失这一行时 `ISOLATION_SQL()` 会抛 ReferenceError，而
+ * `collectVerificationEvidence` 的 try/catch 会把它**静默降级成 null**，
+ * 于是「取数炸了」和「查不到」长得一模一样——正是本模块要防的假象。
+ */
+import { TRAFFIC_SCOPES, trafficScopeJoin, trafficScopeWhere } from './testIsolationService.js';
+
 function obj(o) {
   return o && typeof o === 'object' ? o : {};
 }
@@ -463,14 +472,20 @@ export function auditDocsPublicness(docs, o = {}) {
   });
   const bad = files.filter((f) => f.localhostOnly);
   return {
+    // 契约保持不变：ok=true 的语义是**「未发现违规」**，不是「已对外化」。
+    // 0 份文档时同样未发现违规，因此仍是 true —— 但绝不能被上层读成「通过」，
+    // 判据见 auditStageZero 里 RQ-175 的 total===0 守卫。
     ok: bad.length === 0,
     publicUrl: url || null,
     total: files.length,
     offending: bad.map((f) => f.name),
     files,
-    note: bad.length === 0
-      ? `${files.length} 份文档均已包含对外地址。`
-      : `${bad.length}/${files.length} 份文档仍以本机地址作为唯一入口：${bad.map((f) => f.name).join('、')}。`,
+    note:
+      files.length === 0
+        ? '未提供待审计文档（0 份）：无法判定对外化，调用方应视为无证据。'
+        : bad.length === 0
+          ? `${files.length} 份文档均已包含对外地址。`
+          : `${bad.length}/${files.length} 份文档仍以本机地址作为唯一入口：${bad.map((f) => f.name).join('、')}。`,
   };
 }
 
@@ -716,12 +731,24 @@ export const DEDUPE_SQL = `
     HAVING COUNT(*) > 1
   ) d`;
 
-/** 自测流量占比：分子分母都要，只有占比才能判断「看板是否被污染」 */
-export const ISOLATION_SQL = `
+/**
+ * 自测流量占比：分子分母都要，只有占比才能判断「看板是否被污染」。
+ *
+ * 刻意显式声明 `scope: all` 而不是裸写 SQL：
+ * 这是**元操作**（判断隔离是否生效），必须能看见被标记的行，
+ * 否则覆盖率永远算出来是 0%，隔离看起来「完美生效」。
+ * 走 `trafficScopeWhere` 同时让 RQ-157 的源码扫描认账（该扫描要求口径声明
+ * 出现在 FROM analytics_events 之后，裸写 SQL 会被判为未声明口径）。
+ */
+export function ISOLATION_SQL(scope = TRAFFIC_SCOPES.all) {
+  return `
   SELECT COUNT(*)::int AS total,
-         COUNT(*) FILTER (WHERE COALESCE(is_test, false))::int AS test_rows
-    FROM analytics_events
-   WHERE created_at >= now() - ($1 || ' days')::interval`;
+         COUNT(*) FILTER (WHERE COALESCE(e.is_test, false) OR COALESCE(u.is_test, false))::int AS test_rows
+    FROM analytics_events e
+    ${trafficScopeJoin({ eventAlias: 'e', userAlias: 'u' })}
+   WHERE ${trafficScopeWhere({ eventAlias: 'e', userAlias: 'u', scope })}
+     AND e.created_at >= now() - ($1 || ' days')::interval`;
+}
 
 /**
  * 采集 RQ-177 四项闸门的**真实读数**。
@@ -746,7 +773,7 @@ export async function collectVerificationEvidence({ queryFn = null, days = 30, c
 
   let isolation = { ok: false, isTestCoverage: null, note: '自测流量读数不可得' };
   try {
-    const { rows } = await queryFn(ISOLATION_SQL, [String(days)]);
+    const { rows } = await queryFn(ISOLATION_SQL(), [String(days)]);
     const total = rows[0]?.total ?? null;
     const testRows = rows[0]?.test_rows ?? null;
     if (total !== null) {
@@ -819,7 +846,19 @@ export function auditStageZero(o = {}) {
       detail: entry.ready ? truth.verdict : (entry.nextAction || '对外入口未配置'),
     },
     { rq: 'RQ-174', title: '首屏落地页与最短路径', verdict: landing.ok === true, detail: landing.note },
-    { rq: 'RQ-175', title: '文档对外化', verdict: docs.ok === true, detail: docs.note },
+    {
+      rq: 'RQ-175',
+      title: '文档对外化',
+      // 空集合的真值（vacuous truth）是本项目反复踩过的坑：0 份文档 →
+      // auditDocsPublicness 的 bad.length===0 → ok:true，看起来像「审过且全部合格」。
+      // 生产镜像只 COPY backend/，README.md / frontend/nginx.conf 根本不在 /app，
+      // 因此不带证据时一律判 unknown，而不是拿「什么都没扫到」冒充通过。
+      verdict: docs.total === 0 ? null : docs.ok === true,
+      detail:
+        docs.total === 0
+          ? '未提供待审计文档（0 份）：生产镜像内无 README.md / frontend/nginx.conf，无法判定对外化，不计为通过。'
+          : docs.note,
+    },
     {
       rq: 'RQ-176',
       title: '有效完成全站一致',
@@ -865,9 +904,11 @@ export function auditStageZero(o = {}) {
       ? '公网入口已就绪，冻结项可按阶段一顺序解冻。'
       : `RQ-173 未完成，${frozen.length} 项维持冻结（硬约束第 7 条）：${frozen.join('、')}。`,
     note:
-      failed.length === 0
-        ? '阶段零五项 P0 全部通过。'
-        : `阶段零未通过 ${failed.length} 项：${failed.join('、')}。`,
+      failed.length > 0
+        ? `阶段零未通过 ${failed.length} 项：${failed.join('、')}。`
+        : unknown.length > 0
+          ? `阶段零无确凿失败，但 ${unknown.length} 项缺少证据：${unknown.join('、')}；待补证后方可收口。`
+          : '阶段零五项 P0 全部通过。',
   };
 }
 

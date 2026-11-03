@@ -60,12 +60,23 @@ export function summarizeFunnel(rows = []) {
     const started = toMs(r?.startedAt);
     const finished = toMs(r?.finishedAt);
     const decisions = Math.max(0, Math.floor(Number(r?.decisions) || 0));
+    /**
+     * RQ-176：有效完成标记。`effective_completed` 由 `routes/blind.js` 在结算时落库
+     * （≥1 笔成交 + 走完全部 K 线 + 达最短时长）。
+     *
+     * 三态而非二态的理由：历史会话迁移前没有这个字段，值为 NULL。
+     * 把 NULL 一刀切判为「未完成」会让历史完成数凭空归零，
+     * 把 NULL 判为「已完成」则空跑继续刷满——因此单独记 `unrated` 交给调用方判断。
+     */
+    const effective = r?.effective === true ? true : r?.effective === false ? false : null;
+    const unrated = effective === null && finished != null;
 
     // 到达深度：完成 > 持续决策 > 首次决策 > 仅开始
     let reachedIdx = 0;
     if (decisions >= 1) reachedIdx = 1;
     if (decisions >= 2) reachedIdx = 2;
-    if (finished != null) reachedIdx = 3;
+    // 空跑（effective === false）明确不计入完成；未评估的历史会话沿用 finished_at
+    if (finished != null && effective !== false) reachedIdx = 3;
 
     const secToFirstDecision = secBetween(started, toMs(r?.firstDecisionAt));
     return {
@@ -77,6 +88,8 @@ export function summarizeFunnel(rows = []) {
       breakpoint: reachedIdx >= FUNNEL_STEPS.length - 1 ? null : FUNNEL_STEPS[reachedIdx + 1].key,
       breakpointLabel: reachedIdx >= FUNNEL_STEPS.length - 1 ? null : FUNNEL_STEPS[reachedIdx + 1].label,
       decisions,
+      effective,
+      unrated,
       secToFirstDecision,
       secTotal: secBetween(started, finished),
       // RQ-92 验收：首决策是否落在 60 秒预算内
@@ -97,8 +110,31 @@ export function summarizeFunnel(rows = []) {
   const firstCount = atLeast(1);
   const finishCount = atLeast(3);
 
+  /**
+   * RQ-176：有效完成数单独给出。
+   *
+   * 为什么不让 `finishCount` 直接改成只数有效完成：漏斗的 `reached` 深度还要用来
+   * 表达「这一步卡了多少人」，一步改完会让历史会话的整体深度一起塌陷，
+   * 看板会读成「产品突然变差了」。因此 `finishCount` 保持原有语义（含未评估历史），
+   * 另给 `effectiveFinishCount` 作为 RQ-176 的判据，两条数并排才看得出差多少。
+   */
+  const effectiveFinishCount = sessions.filter((s) => s.effective === true).length;
+  const unratedCount = sessions.filter((s) => s.unrated === true).length;
+  const emptyRunCount = sessions.filter((s) => s.effective === false).length;
+
   return {
     steps: counts,
+    completionCaliber: {
+      effectiveFinishCount,
+      unratedCount,
+      emptyRunCount,
+      // 有效完成率才是 RQ-176 之后的北极星口径
+      effectiveFinishRate: startedCount > 0 ? Math.round((effectiveFinishCount / startedCount) * 10000) / 100 : null,
+      note:
+        emptyRunCount === 0
+          ? '无空跑会话计入完成。'
+          : `${emptyRunCount} 局空跑（0 笔成交 / 时长不足）已从完成口径中剔除。`,
+    },
     conversion: {
       total,
       startToFirstDecision: startedCount > 0 ? Math.round((firstCount / startedCount) * 10000) / 100 : null,
@@ -130,13 +166,14 @@ export async function trainingFunnel({ days = 30, limit = 500 } = {}) {
             s.user_id AS user_id,
             s.created_at AS started_at,
             s.finished_at AS finished_at,
+            s.effective_completed AS effective_completed,
             MIN(d.created_at) AS first_decision_at,
             MAX(d.created_at) AS last_decision_at,
             COUNT(d.id)::int AS decisions
        FROM blind_sessions s
        LEFT JOIN blind_decisions d ON d.session_id = s.id
       WHERE s.created_at >= now() - ($1 || ' days')::interval
-      GROUP BY s.id, s.user_id, s.created_at, s.finished_at
+      GROUP BY s.id, s.user_id, s.created_at, s.finished_at, s.effective_completed
       ORDER BY s.created_at DESC
       LIMIT $2`,
     [String(d), clampLimit(limit, 2000, 500)]
@@ -152,6 +189,9 @@ export async function trainingFunnel({ days = 30, limit = 500 } = {}) {
         lastDecisionAt: r.last_decision_at,
         finishedAt: r.finished_at,
         decisions: r.decisions,
+        effective: r.effective_completed === null || r.effective_completed === undefined
+          ? null
+          : Boolean(r.effective_completed),
       }))
     ),
   };
