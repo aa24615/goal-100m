@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
 import { checkTelemetryConsistency, recordVerification, verificationStreak, latestVerifications } from '../services/releaseGateService.js';
+import { scanRepoWording } from '../services/identityWordingService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..', '..', '..');
@@ -273,7 +274,36 @@ export async function checkConsistency({ queryFn = null, days = 3650 } = {}) {
   return checkTelemetryConsistency({ queryFn, days });
 }
 
-/* ------------------------------ 8. 验证留痕（RQ-160） ------------------------------ */
+/* ------------------------------ 8. 身份口径合规（RQ-193） ------------------------------ */
+
+/**
+ * RQ-193 身份口径纠偏：对外口径必须「真实 A 股行情 + 模拟撮合」，
+ * 不得出现「虚拟仿真」「交易大厅」等误述（前者与实际跑真实行情矛盾，
+ * 后者让产品正面撞同花顺/叩富，差异化叙事混乱，F-114）。
+ *
+ * 通过 scanRepoWording（identityWordingService）扫描对外文档（README），
+ * 把「RQ-193 是否守住」固化进发布后验证，避免再次漂移。
+ * README 缺失时降级为 warn（不阻断，但明示「未校验」）。
+ */
+export function checkIdentityWordingCompliance({ paths = null, readFn = readFileSync, existsFn = existsSync } = {}) {
+  const targets = Array.isArray(paths) && paths.length ? paths : [join(REPO_ROOT, 'README.md')];
+  const existing = targets.filter((p) => existsFn(p));
+  if (existing.length === 0) {
+    return { name: 'identity-wording', ok: true, warn: true, detail: '未找到 README，跳过身份口径校验（RQ-193）' };
+  }
+  const r = scanRepoWording({ paths: existing, readFn, existsFn });
+  return {
+    name: 'identity-wording',
+    ok: r.ok,
+    warn: !r.ok,
+    detail: r.ok
+      ? 'README 身份口径合规（真实行情+模拟撮合，无虚拟仿真/交易大厅误述）'
+      : `README 命中 ${r.violations.length} 处误述：${r.violations.map((v) => `${v.path}:${v.hits.join('/')}`).join('；')}`,
+    violations: r.violations,
+  };
+}
+
+/* ------------------------------ 9. 验证留痕（RQ-160） ------------------------------ */
 
 export function gitHead({ execFn = execFileSync, cwd = REPO_ROOT } = {}) {
   try {
@@ -422,6 +452,8 @@ export async function runVerify(opts = {}) {
     // v15 阶段零：RQ-173~177 上线后断言
     await checkStageZero({ ...o, baseUrl }),
     await checkStatusTruth({ ...o, baseUrl }),
+    // v17 RQ-193：身份口径合规固化（README 不得含虚拟仿真/交易大厅误述）
+    checkIdentityWordingCompliance({ ...o }),
   ];
   const partial = { ok: results.filter((r) => !r.ok).length === 0, results, baseUrl, since };
   // RQ-160：留痕必须在前 7 项之后——记录的是「本次到底验出了什么」，

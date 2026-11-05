@@ -315,3 +315,93 @@ export function allowFinishTelemetry(evaluation) {
     alternative: e.effective ? null : 'blind_finish_invalid',
   };
 }
+
+/* ------------------------------------------------------------------ *
+ * RQ-191 · 清理历史盲测空跑（北极星读数可信）                          *
+ * ------------------------------------------------------------------ */
+
+/**
+ * 把被记为「有效完成」、但耗时低于阈值的会话挑出来（纯函数）。
+ *
+ * 与 `evaluateEffectiveCompletion` 的门槛（`minDurationSec = 10`）不同，
+ * 历史清理默认阈值为 1 秒——只抓「脚本/误触」级别的空跑（实测出现过 0.135 秒、
+ * 0.29 秒一局），不碰 1~10 秒之间的真实短局，避免误伤。
+ *
+ * 只处理 `effective_completed = TRUE` 的行：已标记 f 的不动，幂等。
+ *
+ * @param {Array} sessions [{ id, effective_completed, created_at, finished_at, status, score? }]
+ * @param {object} [o] { thresholdSec }
+ */
+export function planEmptyRunFlag(sessions = [], o = {}) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const opts = o && typeof o === 'object' ? o : {};
+  const thresholdSec = Number.isFinite(Number(opts.thresholdSec)) ? Math.max(0, Number(opts.thresholdSec)) : 1;
+  const flagged = [];
+  for (const s of list) {
+    const sess = s && typeof s === 'object' ? s : {};
+    if (sess.effective_completed !== true) continue;
+    const sc = sess.score && typeof sess.score === 'object' ? sess.score : null;
+    const dur = durationSecOf(sess, sc);
+    if (dur != null && dur < thresholdSec) flagged.push(sess.id);
+  }
+  return { thresholdSec, flagged, count: flagged.length };
+}
+
+/**
+ * 把历史空跑的 `effective_completed` 由 TRUE 改为 FALSE（**dryRun 默认开启**）。
+ *
+ * 只读 `created_at` / `finished_at` 推算耗时，不依赖 score 表，规避列名漂移；
+ * `durationSecOf` 在 score.durationSec 缺失/为 0 时自动回落到时间戳。
+ *
+ * 改库是不可逆动作，故 **dryRun 默认开启**：默认只报数不执行，
+ * 确需清理时在有人值守时显式传 `dryRun:false` 并执行 `npm run test:integration` 复核。
+ *
+ * @param {object} [o]
+ * @param {boolean} [o.dryRun]       默认 true（只统计，不改库）
+ * @param {number}  [o.thresholdSec] 默认 1（秒）
+ * @param {number}  [o.batch]        单次更新上限，默认 5000
+ * @param {Function}[o.queryFn]      依赖注入，便于无库单测
+ */
+export async function flagEmptyRunsCompletedFalse({ dryRun = true, thresholdSec = 1, batch = 5000, queryFn = null } = {}) {
+  const q = queryFn || ((sql, params) => pool.query(sql, params));
+  const t = Number.isFinite(Number(thresholdSec)) ? Math.max(0, Number(thresholdSec)) : 1;
+
+  const { rows } = await q(
+    `SELECT s.id, s.effective_completed, s.created_at, s.finished_at, s.status
+       FROM blind_sessions s
+      WHERE s.effective_completed = TRUE`
+  );
+
+  const flagged = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const dur = durationSecOf(
+      { created_at: r.created_at, finished_at: r.finished_at, status: r.status },
+      {}
+    );
+    if (dur != null && dur < t) flagged.push(r.id);
+  }
+
+  if (dryRun || flagged.length === 0) {
+    return {
+      dryRun,
+      thresholdSec: t,
+      flagged: flagged.length,
+      affected: 0,
+      note: dryRun ? 'dryRun 默认开启，未执行更新（RQ-191 历史清理）' : '无可标记记录',
+    };
+  }
+
+  const limit = Math.min(50000, Math.max(1, Math.floor(Number(batch) || 5000)));
+  const ids = flagged.slice(0, limit);
+  const { rowCount } = await q(
+    `UPDATE blind_sessions SET effective_completed = FALSE WHERE id = ANY($1::int[])`,
+    [ids]
+  );
+  return {
+    dryRun: false,
+    thresholdSec: t,
+    flagged: flagged.length,
+    affected: rowCount || 0,
+    note: `已将 ${rowCount || 0} 条空跑（耗时 < ${t}s）标记 effective_completed = FALSE`,
+  };
+}
