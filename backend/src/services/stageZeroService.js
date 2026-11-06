@@ -38,6 +38,7 @@
  * 于是「取数炸了」和「查不到」长得一模一样——正是本模块要防的假象。
  */
 import { TRAFFIC_SCOPES, trafficScopeJoin, trafficScopeWhere } from './testIsolationService.js';
+import { DIFFERENTIATION_PIECES } from './threePieceExposureService.js';
 
 function obj(o) {
   return o && typeof o === 'object' ? o : {};
@@ -367,6 +368,16 @@ export function buildLandingCopy(o = {}) {
       { key: 'register', title: LANDING_ELEMENTS[1].title, body: registerBody },
       { key: 'retention', title: LANDING_ELEMENTS[2].title, body: retentionBody },
     ],
+    /**
+     * RQ-203 差异化叙事前置：三件套（可核对 / 可信度 / 保留期）在首访入口显式说出来。
+     * 锚点术语与 `threePieceExposureService.DIFFERENTIATION_PIECES` 同源，避免前后端漂移。
+     * 这是竞品全无的信任壁垒（A′ / B′ / C），首访不说等于把差异化藏起来。
+     */
+    differentiators: [
+      { key: 'checkable', title: DIFFERENTIATION_PIECES[0].title, body: '每一笔成交都摊开可核对：撮合价溯源到 K 线、费用逐笔拆解、拒绝原因公开，而不是让你选择相信我们。' },
+      { key: 'confidence', title: DIFFERENTIATION_PIECES[1].title, body: '成绩卡带 95% 置信区间与误差带；样本不足时只给成本与行为事实，不编造胜率结论。' },
+      { key: 'retention', title: DIFFERENTIATION_PIECES[2].title, body: retentionBody },
+    ],
     disclaimer: trim(src.disclaimer) || '真实 A 股公开行情 · 模拟资金与模拟交易 · 仅供学习研究，不构成投资建议',
   };
 }
@@ -445,6 +456,12 @@ export function renderVisitorHelp(o = {}) {
     '',
     '- 是：用真实 A 股**历史**行情做模拟决策的训练与复盘工具。',
     '- 不是：实盘交易、行情终端、投资建议。所有资金与成交均为模拟。',
+    '',
+    '## 为什么可以相信它',
+    '',
+    '- **可核对**：每一笔成交都能溯源到是哪一根 K 线的收盘价，费用逐笔拆解，拒绝原因公开。',
+    '- **可信度护栏**：成绩卡带 95% 置信区间与误差带；样本太少时只给成本与行为事实，不编造胜率。',
+    '- **保留期承诺**：登录用户的训练记录长期保留，你的投入不会凭空消失。',
     '',
     '> 行情数据为真实 A 股公开数据，仅供学习研究，不构成投资建议。',
     '',
