@@ -91,12 +91,147 @@ body {
   margin: 0 6px;
 }
 
-/* 营销落地页左侧品牌区，鼠标悬浮轻微上浮 */
+/* ---------------- 登录 / 注册页布局（AuthShell） ----------------
+   2026-11-08 修复「登录界面样式乱了」：左栏曾把 LandingHero 整块 Card 与
+   一整套重复的品牌标题/说明/特性并列堆叠，高度约为右栏两倍，
+   两栏 alignItems:center 造成顶部错位、footer 被 overflow:hidden 裁掉。
+   这里统一改为顶部对齐 + 独立光斑裁切层 + 窄屏单列。 */
+.auth-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: linear-gradient(135deg, #f2fbfa 0%, #dcf1ee 100%);
+}
+
+/* 装饰光斑放在独立的绝对定位层里裁切，绝不能用外层 overflow:hidden，
+   否则内容超出一屏时页脚会被直接切掉（旧版正是这里出的问题）。 */
+.auth-glow-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.auth-glow-tr {
+  position: absolute;
+  width: 360px;
+  height: 360px;
+  right: -90px;
+  top: -120px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(20, 184, 166, 0.18) 0%, rgba(20, 184, 166, 0) 70%);
+}
+
+.auth-glow-bl {
+  position: absolute;
+  width: 300px;
+  height: 300px;
+  left: -80px;
+  bottom: -100px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(13, 148, 136, 0.14) 0%, rgba(13, 148, 136, 0) 70%);
+}
+
+.auth-main {
+  flex: 1;
+  display: flex;
+  align-items: flex-start; /* 顶部对齐：两栏高度不等也不会上下错位 */
+  justify-content: center;
+  padding: 48px 24px 24px;
+  position: relative;
+  z-index: 1;
+}
+
+.auth-grid {
+  width: 100%;
+  max-width: 940px;
+  display: flex;
+  gap: 32px;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.auth-brand {
+  flex: 1 1 420px;
+  min-width: 0;
+  max-width: 440px;
+}
+
+.auth-form {
+  flex: 0 0 360px;
+  width: 360px;
+  position: sticky;
+  top: 48px;
+}
+
+.auth-card {
+  width: 100%;
+  box-shadow: 0 12px 40px rgba(13, 148, 136, 0.16);
+  border-radius: 12px;
+}
+
+/* 左栏品牌区：只保留一条主线，不再与 LandingHero 重复叙事 */
 .brand-pitch {
   transition: transform 0.25s ease;
 }
 .brand-pitch:hover {
   transform: translateY(-2px);
+}
+
+.auth-brand-head {
+  margin-bottom: 16px;
+}
+
+.auth-brand-title {
+  color: #0f766e !important;
+  margin: 0 0 4px !important;
+  letter-spacing: 1px;
+}
+
+.auth-brand-sub {
+  color: #5f807d;
+  font-size: 14px;
+  letter-spacing: 3px;
+}
+
+/* 真实规则说明压成一行小字，避免旧版 5 条长列表把左栏撑爆 */
+.auth-rule-line {
+  display: block;
+  margin-top: 12px !important;
+  font-size: 12px !important;
+  line-height: 1.9;
+  color: #5f807d !important;
+}
+
+/* 窄屏：单列且登录卡置顶，先让用户看到能操作的东西 */
+@media (max-width: 900px) {
+  .auth-main {
+    padding: 24px 16px 16px;
+  }
+
+  .auth-grid {
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .auth-form {
+    order: -1;
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 420px;
+    position: static;
+  }
+
+  .auth-brand {
+    width: 100%;
+    max-width: 420px;
+  }
+
+  .auth-footer {
+    margin-top: 16px;
+  }
 }
 
 /* ---------------- RQ-23 排行榜「我的排名」 ----------------

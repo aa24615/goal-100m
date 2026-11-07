@@ -1,16 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Tabs, Form, Input, Button, Typography, App, Divider } from 'antd';
+import { Card, Tabs, Form, Input, Button, Typography, App } from 'antd';
 import { useAuth } from '../auth';
 import Forgot from './Forgot';
 import RetentionNoticeCard from '../components/RetentionNoticeCard';
-import LandingHero from '../components/LandingHero';
+import AuthShell from '../components/AuthShell';
+import LoginBrand from '../components/LoginBrand';
 import { getRetentionNotice, createGuestSession } from '../api';
 import type { RetentionPayload } from '../types';
-// RQ-51/RQ-72：口径统一取自常量，页面不再写字面量（否则三处必然再度漂移）
-import { DATA_SOURCE_STATEMENT } from '../constants';
 
-const { Title, Paragraph, Text } = Typography;
+const { Title, Text } = Typography;
 
 export default function Login() {
   const { login, register } = useAuth();
@@ -22,6 +21,8 @@ export default function Login() {
   const [forgot, setForgot] = useState(false);
   // RQ-154 保留期承诺：注册页必须可见，文案一律取自后端，前端不复制常量
   const [retention, setRetention] = useState<RetentionPayload | null>(null);
+  // 首屏「登录 / 注册保留成绩」CTA 需要真正切到注册 Tab；旧版传的是 setForgot(false)，点了没反应
+  const [activeTab, setActiveTab] = useState('login');
   const navigate = useNavigate();
 
   /**
@@ -112,195 +113,119 @@ export default function Login() {
   };
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        position: 'relative',
-        overflow: 'hidden',
-        background: 'linear-gradient(135deg, #f2fbfa 0%, #dcf1ee 100%)',
-      }}
+    <AuthShell
+      brand={
+        <LoginBrand
+          onGuestTrain={onGuestTrain}
+          onRegister={() => setActiveTab('register')}
+        />
+      }
     >
-      {/* 装饰光斑 */}
-      <div
-        style={{
-          position: 'absolute',
-          width: 360,
-          height: 360,
-          right: -90,
-          top: -120,
-          borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(20,184,166,0.18) 0%, rgba(20,184,166,0) 70%)',
-          pointerEvents: 'none',
-        }}
-      />
-      <div
-        style={{
-          position: 'absolute',
-          width: 300,
-          height: 300,
-          left: -80,
-          bottom: -100,
-          borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(13,148,136,0.14) 0%, rgba(13,148,136,0) 70%)',
-          pointerEvents: 'none',
-        }}
-      />
-
-      {/* 中部内容区：占满剩余高度并垂直居中 */}
-      <div
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: 24,
-          position: 'relative',
-          zIndex: 1,
-        }}
-      >
-        <div style={{ width: '100%', maxWidth: 880, display: 'flex', gap: 32, flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' }}>
-          <div className="brand-pitch" style={{ maxWidth: 380, padding: '20px 0' }}>
-            {/* RQ-174 首屏三要素：练什么 / 要不要注册 / 记录留多久，未登录即可见 */}
-            <LandingHero onRegister={() => setForgot(false)} onGuestTrain={onGuestTrain} />
-            <Title style={{ color: '#0f766e', marginBottom: 4 }}>赚一个小目标</Title>
-            <div style={{ color: '#5f807d', fontSize: 14, letterSpacing: 3, marginBottom: 12 }}>
-              模 拟 股 票
-            </div>
-            <Paragraph style={{ color: '#476b68', fontSize: 15 }}>
-              零风险练盘感，百万模拟金起步。真实 A 股公开行情 + 模拟撮合、持仓盈亏与收益排行榜，
-              让练过的东西能迁移到真实市场。
-            </Paragraph>
-            <Divider style={{ borderColor: 'rgba(13,148,136,0.25)' }} />
-            <Paragraph style={{ color: '#5f807d', fontSize: 13 }}>
-              · 注册即赠 ¥1,000,000 模拟资金<br />
-              · 真实 A 股行情，涨跌停按板块（主板 ±10% / 创业板·科创板 ±20% / 北交所 ±30% / 主板 ST ±5%）<br />
-              · 停牌与退市标的不可交易，下单即给出原因<br />
-              · 多用户同台竞技，收益排行榜见真章<br />
-              · 佣金 / 印花税 / 过户费全仿真
-            </Paragraph>
-          </div>
-          <Card style={{ width: 360, boxShadow: '0 12px 40px rgba(13,148,136,0.16)', borderRadius: 12 }}>
-            <Title level={4} style={{ textAlign: 'center', marginBottom: 24 }}>
-              进入交易大厅
-            </Title>
-            <Tabs
-              centered
-              items={[
-                {
-                  key: 'login',
-                  label: '登录',
-                  children: (
-                    <Form layout="vertical" onFinish={onLogin}>
-                      <Form.Item name="account" label="用户名 / 邮箱" rules={[{ required: true, message: '请输入账号' }]}>
-                        <Input size="large" placeholder="用户名或邮箱" />
-                      </Form.Item>
-                      <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
-                        <Input.Password size="large" placeholder="密码" />
-                      </Form.Item>
-                      <Button type="primary" htmlType="submit" block size="large" loading={loginLoading}>
-                        登录
-                      </Button>
-                      {/* RQ-30：忘记密码不再是死路 */}
-                      <div style={{ textAlign: 'right', marginTop: 8 }}>
-                        <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setForgot(true)} data-testid="goto-forgot">
-                          忘记密码？
-                        </Button>
-                      </div>
-                    </Form>
-                  ),
-                },
-                {
-                  key: 'register',
-                  label: '注册',
-                  children: (
-                    <Form layout="vertical" onFinish={onRegister}>
-                      <Form.Item
-                        name="username"
-                        label="用户名"
-                        rules={[
-                          { required: true, message: '请输入用户名' },
-                          {
-                            pattern: /^[a-zA-Z0-9_]{3,20}$/,
-                            message: '3-20 位字母、数字或下划线',
-                          },
-                        ]}
-                      >
-                        <Input size="large" placeholder="3-20 位字母/数字/下划线" />
-                      </Form.Item>
-                      <Form.Item
-                        name="email"
-                        label="邮箱"
-                        rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}
-                      >
-                        <Input size="large" placeholder="用于账号识别" />
-                      </Form.Item>
-                      <Form.Item
-                        name="password"
-                        label="密码"
-                        rules={[
-                          { required: true, message: '请输入密码' },
-                          { min: 8, max: 32, message: '密码需 8-32 位' },
-                          {
-                            validator: (_, v) =>
-                              !v || /^\d+$/.test(v)
-                                ? Promise.reject(new Error('密码不能全为数字'))
-                                : Promise.resolve(),
-                          },
-                        ]}
-                      >
-                        <Input.Password size="large" placeholder="8-32 位，建议字母+数字" />
-                      </Form.Item>
-                      <Form.Item
-                        name="confirm"
-                        label="确认密码"
-                        dependencies={['password']}
-                        rules={[
-                          { required: true, message: '请再次输入密码' },
-                          ({ getFieldValue }) => ({
-                            validator: (_, v) =>
-                              !v || v === getFieldValue('password')
-                                ? Promise.resolve()
-                                : Promise.reject(new Error('两次输入的密码不一致')),
-                          }),
-                        ]}
-                      >
-                        <Input.Password size="large" placeholder="再次输入密码" />
-                      </Form.Item>
-                      {/* RQ-154 保留期承诺：写在用户投入之前（注册页必须可见） */}
-                      <div style={{ marginBottom: 12 }}>
-                        <RetentionNoticeCard data={retention} />
-                      </div>
-                      <Button type="primary" htmlType="submit" block size="large" loading={registerLoading}>
-                        注册并领取模拟金
-                      </Button>
-                    </Form>
-                  ),
-                },
-              ]}
-            />
-            <Text type="secondary" style={{ display: 'block', textAlign: 'center', fontSize: 12 }}>
-              真实 A 股行情 · 模拟资金与模拟交易 · 不涉及任何真实交易，不构成投资建议。
-            </Text>
-          </Card>
-        </div>
-      </div>
-
-      <footer className="auth-footer">
-        <div>
-          <span style={{ color: '#0d9488', fontWeight: 600 }}>赚一个小目标 · 模拟股票</span>
-          <span>　|　仅供模拟练习，不构成任何投资建议</span>
-        </div>
-        <div>
-          <a href="#" onClick={(e) => e.preventDefault()}>模拟交易说明</a>
-          <a href="#" onClick={(e) => e.preventDefault()}>风险揭示</a>
-          <a href="#" onClick={(e) => e.preventDefault()}>联系我们</a>
-        </div>
-        <div style={{ opacity: 0.8 }}>
-          © {new Date().getFullYear()} 模拟股票实验室 · 模拟资金 ¥1,000,000 起 · {DATA_SOURCE_STATEMENT}
-        </div>
-      </footer>
-    </div>
+      <Card className="auth-card">
+        <Title level={4} style={{ textAlign: 'center', marginBottom: 24 }}>
+          进入交易大厅
+        </Title>
+        <Tabs
+          centered
+          activeKey={activeTab}
+          onChange={setActiveTab}
+          items={[
+            {
+              key: 'login',
+              label: '登录',
+              children: (
+                <Form layout="vertical" onFinish={onLogin}>
+                  <Form.Item name="account" label="用户名 / 邮箱" rules={[{ required: true, message: '请输入账号' }]}>
+                    <Input size="large" placeholder="用户名或邮箱" />
+                  </Form.Item>
+                  <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
+                    <Input.Password size="large" placeholder="密码" />
+                  </Form.Item>
+                  <Button type="primary" htmlType="submit" block size="large" loading={loginLoading}>
+                    登录
+                  </Button>
+                  {/* RQ-30：忘记密码不再是死路 */}
+                  <div style={{ textAlign: 'right', marginTop: 8 }}>
+                    <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setForgot(true)} data-testid="goto-forgot">
+                      忘记密码？
+                    </Button>
+                  </div>
+                </Form>
+              ),
+            },
+            {
+              key: 'register',
+              label: '注册',
+              children: (
+                <Form layout="vertical" onFinish={onRegister}>
+                  <Form.Item
+                    name="username"
+                    label="用户名"
+                    rules={[
+                      { required: true, message: '请输入用户名' },
+                      {
+                        pattern: /^[a-zA-Z0-9_]{3,20}$/,
+                        message: '3-20 位字母、数字或下划线',
+                      },
+                    ]}
+                  >
+                    <Input size="large" placeholder="3-20 位字母/数字/下划线" />
+                  </Form.Item>
+                  <Form.Item
+                    name="email"
+                    label="邮箱"
+                    rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}
+                  >
+                    <Input size="large" placeholder="用于账号识别" />
+                  </Form.Item>
+                  <Form.Item
+                    name="password"
+                    label="密码"
+                    rules={[
+                      { required: true, message: '请输入密码' },
+                      { min: 8, max: 32, message: '密码需 8-32 位' },
+                      {
+                        validator: (_, v) =>
+                          !v || /^\d+$/.test(v)
+                            ? Promise.reject(new Error('密码不能全为数字'))
+                            : Promise.resolve(),
+                      },
+                    ]}
+                  >
+                    <Input.Password size="large" placeholder="8-32 位，建议字母+数字" />
+                  </Form.Item>
+                  <Form.Item
+                    name="confirm"
+                    label="确认密码"
+                    dependencies={['password']}
+                    rules={[
+                      { required: true, message: '请再次输入密码' },
+                      ({ getFieldValue }) => ({
+                        validator: (_, v) =>
+                          !v || v === getFieldValue('password')
+                            ? Promise.resolve()
+                            : Promise.reject(new Error('两次输入的密码不一致')),
+                      }),
+                    ]}
+                  >
+                    <Input.Password size="large" placeholder="再次输入密码" />
+                  </Form.Item>
+                  {/* RQ-154 保留期承诺：写在用户投入之前（注册页必须可见） */}
+                  <div style={{ marginBottom: 12 }}>
+                    <RetentionNoticeCard data={retention} />
+                  </div>
+                  <Button type="primary" htmlType="submit" block size="large" loading={registerLoading}>
+                    注册并领取模拟金
+                  </Button>
+                </Form>
+              ),
+            },
+          ]}
+        />
+        <Text type="secondary" style={{ display: 'block', textAlign: 'center', fontSize: 12 }}>
+          真实 A 股行情 · 模拟资金与模拟交易 · 不涉及任何真实交易，不构成投资建议。
+        </Text>
+      </Card>
+    </AuthShell>
   );
 }
