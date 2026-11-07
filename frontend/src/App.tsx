@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import {
-  Layout,
   Menu,
   Space,
   Dropdown,
@@ -58,11 +57,11 @@ import { subscribe } from './ws';
 import UserAvatar from './components/UserAvatar';
 import TabBar from './components/TabBar';
 import GuideOverlay from './components/GuideOverlay';
+import AppShell from './components/AppShell';
 import MarketStatusBar, { ThemeControls } from './components/MarketStatusBar';
 import { HOME, TABS_STORAGE_KEY, NAV_ORDER, NAV_GROUPS, MENU_LABEL, BRAND } from './constants';
 import type { MarketStatus, Preferences } from './types';
 
-const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
@@ -318,31 +317,19 @@ function Shell() {
         token: { colorPrimary: '#0d9488' },
       }}
     >
-      <Layout style={{ minHeight: '100vh' }}>
-        {!isMobile && (
-          <Sider theme={prefs.theme === 'dark' ? 'dark' : 'light'} width={200} breakpoint="lg" collapsedWidth={0}>
-            <div className="logo">
-              <span className="logo-main">{BRAND.name}</span>
-              <span className="logo-sub">{BRAND.sub}</span>
-            </div>
-            {nav}
-          </Sider>
-        )}
-
-        <Layout>
-          <Header
-            style={{
-              background: prefs.theme === 'dark' ? '#141414' : '#fff',
-              padding: '0 16px',
-              minHeight: 64,
-              height: 'auto',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              flexWrap: 'wrap',
-              rowGap: 8,
-            }}
-          >
+      <AppShell
+        isMobile={isMobile}
+        siderTheme={prefs.theme === 'dark' ? 'dark' : 'light'}
+        pathname={pathname}
+        brand={
+          <>
+            <span className="logo-main">{BRAND.name}</span>
+            <span className="logo-sub">{BRAND.sub}</span>
+          </>
+        }
+        nav={nav}
+        header={
+          <>
             <Space size="small" wrap>
               {isMobile && <Button type="text" icon={<MenuOutlined />} onClick={() => setDrawerOpen(true)} />}
               {/* RQ-93：首屏不再自称「模拟交易大厅」——那会把新用户带进同花顺/叩富的正面战场 */}
@@ -401,8 +388,9 @@ function Shell() {
                 </Space>
               </Dropdown>
             </Space>
-          </Header>
-
+          </>
+        }
+        tabs={
           <TabBar
             activeKey={pathname}
             items={tabs}
@@ -411,45 +399,43 @@ function Shell() {
             onCloseOthers={closeOthers}
             onCloseAll={closeAll}
           />
+        }
+        overlays={
+          <>
+            {isMobile && (
+              <Drawer
+                placement="left"
+                open={drawerOpen}
+                onClose={() => setDrawerOpen(false)}
+                width={200}
+                styles={{ body: { padding: 0 } }}
+              >
+                {nav}
+              </Drawer>
+            )}
 
-          {/* RQ-25：移动端收窄内边距，避免横向滚动 */}
-          <Content style={{ margin: isMobile ? 8 : 16, padding: 0 }}>
-            <div className="page-card">
-              <Routes>
-                <Route path="/training" element={<Training />} />
-                <Route path="/market" element={<Market />} />
-                <Route path="/watchlist" element={<Watchlist />} />
-                <Route path="/stock/:code" element={<StockDetail />} />
-                <Route path="/portfolio" element={<Portfolio />} />
-                <Route path="/orders" element={<Orders />} />
-                <Route path="/transactions" element={<Transactions />} />
-                <Route path="/replay" element={<Replay />} />
-                <Route path="/blind" element={<Blind />} />
-                <Route path="/review" element={<Review />} />
-                <Route path="/scenarios" element={<Scenarios />} />
-                <Route path="/rooms" element={<Rooms />} />
-                <Route path="/leaderboard" element={<Leaderboard />} />
-                <Route path="/profile" element={<Profile />} />
-              </Routes>
-            </div>
-          </Content>
-        </Layout>
-
-        {isMobile && (
-          <Drawer
-            placement="left"
-            open={drawerOpen}
-            onClose={() => setDrawerOpen(false)}
-            width={200}
-            styles={{ body: { padding: 0 } }}
-          >
-            {nav}
-          </Drawer>
-        )}
-
-        {/* RQ-12：引导浮层，注册后自动出现、可跳过、可重看 */}
-        <GuideOverlay key={guideKey} />
-      </Layout>
+            {/* RQ-12：引导浮层，注册后自动出现、可跳过、可重看 */}
+            <GuideOverlay key={guideKey} />
+          </>
+        }
+      >
+        <Routes>
+          <Route path="/training" element={<Training />} />
+          <Route path="/market" element={<Market />} />
+          <Route path="/watchlist" element={<Watchlist />} />
+          <Route path="/stock/:code" element={<StockDetail />} />
+          <Route path="/portfolio" element={<Portfolio />} />
+          <Route path="/orders" element={<Orders />} />
+          <Route path="/transactions" element={<Transactions />} />
+          <Route path="/replay" element={<Replay />} />
+          <Route path="/blind" element={<Blind />} />
+          <Route path="/review" element={<Review />} />
+          <Route path="/scenarios" element={<Scenarios />} />
+          <Route path="/rooms" element={<Rooms />} />
+          <Route path="/leaderboard" element={<Leaderboard />} />
+          <Route path="/profile" element={<Profile />} />
+        </Routes>
+      </AppShell>
 
       <Modal title="修改密码" open={pwdOpen} onCancel={() => { setPwdOpen(false); pwdForm.resetFields(); }} footer={null}>
         <Form

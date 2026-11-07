@@ -1,0 +1,198 @@
+/* ------------------------------------------------------------------ *
+ * AppShell：左侧与顶部固定，仅右侧内容区滚动
+ * ------------------------------------------------------------------ *
+ * 由 components/AppShell.tsx 引入（在 index.css 之后加载）。
+ * 规则一律带 .app-shell 前缀提高特异性，避免被 antd 的
+ * .ant-layout-* 与 index.css 的既有规则覆盖。
+ *
+ * 关键约束：绝不给 html/body 设 overflow:hidden。
+ * 登录页 AuthShell 内容可能超过一屏，需要 body 仍能滚动，
+ * 否则页脚会被切掉（11-08 修登录页时踩过这个坑）。
+ */
+
+/* 根容器锁死为一屏高，body 因此不会产生整页滚动条 */
+.app-shell {
+  height: 100vh;
+  height: 100dvh; /* 移动端浏览器地址栏伸缩时用动态视口高度 */
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------------- 左侧 Sider ---------------- */
+.app-shell .app-sider {
+  height: 100%;
+  flex: 0 0 auto;
+}
+
+/* antd 的 sider-children 是高度 100% 的普通块，改成纵向 flex：
+   品牌区固定，菜单过长时只在侧栏内部滚，不牵动顶栏和右侧内容 */
+.app-shell .app-sider .ant-layout-sider-children {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-shell .app-sider-brand {
+  flex: 0 0 auto;
+}
+
+.app-shell .app-sider-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ---------------- 右侧主区 ---------------- */
+.app-shell .app-main {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 顶栏与标签栏固定：flex 不参与伸缩，内容区滚动时纹丝不动 */
+.app-shell .app-header {
+  flex: 0 0 auto;
+  min-height: 64px;
+  height: auto;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  row-gap: 8px;
+  line-height: 1.5;
+  position: relative;
+  z-index: 3;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06);
+}
+
+.app-shell .app-tabs {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
+  box-shadow: 0 2px 6px rgba(13, 148, 136, 0.05);
+}
+
+/* 标签栏内部溢出由 antd 的左右箭头处理，原生横条藏起来更干净 */
+.app-shell .app-tabs .ant-tabs-nav-wrap::-webkit-scrollbar {
+  display: none;
+}
+
+/* Content 只做定高框架，不自己滚 */
+.app-shell .app-content-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 唯一的滚动容器 */
+.app-shell .app-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 16px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain; /* 滚到底不把外层/浏览器一起带走 */
+  scrollbar-gutter: stable; /* 滚动条常驻占位，出现/消失时内容不左右跳 */
+}
+
+.app-shell .app-content.is-mobile {
+  margin: 8px;
+}
+
+/* 卡片填满滚动区即可，不能再按 100vh 算高度：
+   旧写法 min-height: calc(100vh - 64px - 46px - 32px) 在顶栏换行
+   或内容区自带 margin 时会额外高出几十像素，平白多出一根滚动条。 */
+.app-shell .app-content > .page-card {
+  min-height: 0;
+  flex: 1 0 auto;
+}
+
+@media (max-width: 768px) {
+  .app-shell .app-header {
+    padding: 0 10px;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 滚动条：细、圆角、半透明，hover 加深，深色模式自动换色
+ * ------------------------------------------------------------------ */
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(13, 148, 136, 0.38) transparent;
+}
+
+/* WebKit / Blink（Chrome、Edge、Safari） */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(13, 148, 136, 0.32);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(13, 148, 136, 0.6);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background-color: rgba(13, 148, 136, 0.78);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 主内容区轨道略宽更好抓取，但 thumb 视觉宽度仍与其他区域一致（12-3-3=6px） */
+.app-shell .app-content::-webkit-scrollbar {
+  width: 12px;
+}
+
+.app-shell .app-content::-webkit-scrollbar-thumb {
+  border-width: 3px;
+  background-color: rgba(13, 148, 136, 0.42);
+}
+
+/* 深色模式：浅色半透明拇指，避免深色底上一条黑杠 */
+body[data-theme='dark'] * {
+  scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+}
+
+body[data-theme='dark'] *::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.24);
+}
+
+body[data-theme='dark'] *::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.44);
+}
+
+body[data-theme='dark'] *::-webkit-scrollbar-thumb:active {
+  background-color: rgba(255, 255, 255, 0.6);
+}
+
+body[data-theme='dark'] .app-shell .app-content::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.3);
+}
+
+/* 触屏设备不显示常驻滚动条，把宽度还给内容 */
+@media (hover: none) {
+  .app-shell .app-content {
+    scrollbar-gutter: auto;
+  }
+}
