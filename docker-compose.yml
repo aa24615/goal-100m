@@ -78,7 +78,9 @@ services:
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      # 宿主机 8080 常被其他本地服务占用，故端口可配置；默认仍为 8080（向后兼容），
+      # 本机在 .env 里设 WEB_PORT=8866 避开冲突。改的是宿主端口，容器内 nginx 仍监听 80。
+      - "${WEB_PORT:-8080}:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 15s
