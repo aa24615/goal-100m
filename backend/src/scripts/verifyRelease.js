@@ -21,8 +21,13 @@
  *   8. verification-record   本次验证落库，并校验「连续 2 次发布均有验证记录」（RQ-160）
  *
  * 用法：
- *   node src/scripts/verifyRelease.js [--json] [--base=http://localhost:8080]
+ *   node src/scripts/verifyRelease.js [--json] [--base=http://localhost:8866]
  *   DATABASE_URL=... node src/scripts/verifyRelease.js   # 需要 DB 的两项
+ *
+ * 默认探测端口与 docker-compose 的 ${WEB_PORT:-8080} 同口径：从仓库根 .env 读取
+ * WEB_PORT，未配置时回退 8080。显式 --base / VERIFY_BASE_URL / PUBLIC_BASE_URL
+ * 始终优先。注意：本机 8080 已被无关服务占用，若脚本写死 8080 会把健康的生产
+ * 误判为 stage-zero/status-truth/telemetry 三项 fetch failed（配置漂移，非代码缺陷）。
  *
  * 全部检查函数都接受依赖注入（fetchFn / queryFn / readFileFn），便于无环境单测。
  */
@@ -65,8 +70,25 @@ export const REQUIRED_ROUTES = [
   { path: '/api/public/help', allow: [200], label: 'RQ-175 访客帮助' },
 ];
 
+/**
+ * 探测基址。显式环境变量优先；否则从仓库根 .env 的 WEB_PORT 解析宿主端口
+ * （与 docker-compose `${WEB_PORT:-8080}:80` 同口径），无 .env / 未配置时回退 8080。
+ * 抽成纯函数便于单测锁定「有 .env=8866 / 无 .env=8080 / 显式参数优先」三种口径。
+ */
+export function resolveVerifyPort(envFileText) {
+  const m = String(envFileText ?? '').match(/^\s*WEB_PORT\s*=\s*(\d+)\s*$/m);
+  return m ? m[1] : '8080';
+}
+
 function defaultBaseUrl() {
-  return String(process.env.VERIFY_BASE_URL || process.env.PUBLIC_BASE_URL || 'http://localhost:8080').replace(/\/+$/, '');
+  const explicit = process.env.VERIFY_BASE_URL || process.env.PUBLIC_BASE_URL;
+  if (explicit) return String(explicit).replace(/\/+$/, '');
+  let envText = '';
+  try {
+    const envPath = join(REPO_ROOT, '.env');
+    if (existsSync(envPath)) envText = readFileSync(envPath, 'utf8');
+  } catch { /* 读不到 .env 时沿用 8080 回退口径 */ }
+  return `http://localhost:${resolveVerifyPort(envText)}`;
 }
 
 /** 从 index.html 里抽出主 bundle 文件名（取 /assets 下的 .js，第一个即入口） */
