@@ -24,7 +24,11 @@
   powershell -ExecutionPolicy Bypass -File backend\scripts\ensure-stack.ps1
 #>
 param(
-  [string]$HealthUrl = "http://localhost:8080/api/health",
+  # Empty means: resolve the host port from ComposeDir\.env (WEB_PORT);
+  # fallback is 8080, matching docker-compose's ${WEB_PORT:-8080} default.
+  # Do NOT hardcode 8080 here -- .env moved to 8866 on 2026-11-08 and a stale
+  # default makes every health probe fail even when the stack is healthy.
+  [string]$HealthUrl = "",
   [string]$ComposeDir = "D:\www\nas-claw\mm8888",
   [string]$LogFile = "D:\www\nas-claw\mm8888\backend\logs\stack-watch.log",
   [string]$DockerBin = "C:\Program Files\Docker\Docker\resources\bin",
@@ -66,7 +70,20 @@ function Test-Daemon {
   }
 }
 
+# ---- 0. resolve health URL from the same .env docker-compose uses ----------
+if ([string]::IsNullOrWhiteSpace($HealthUrl)) {
+  $port = "8080"
+  $envFile = Join-Path $ComposeDir ".env"
+  if (Test-Path $envFile) {
+    foreach ($line in (Get-Content -Path $envFile)) {
+      if ($line -match '^\s*WEB_PORT\s*=\s*([0-9]+)\s*$') { $port = $Matches[1] }
+    }
+  }
+  $HealthUrl = "http://localhost:$port/api/health"
+}
+
 # ---- 1. fast path: healthy, do nothing ------------------------------------
+Write-Log "INFO healthUrl=$HealthUrl"
 if (Test-Health) {
   Write-Log "OK health=200 (no action)"
   exit 0
