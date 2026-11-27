@@ -282,4 +282,6 @@ export const OBJECTION_SQL = {
     'INSERT INTO diagnosis_objections (user_id, guest_token, session_id, diagnosis_key, reason, evidence_text, sample_size) ' +
     'VALUES ($1,$2,$3,$4,$5,$6,$7)',
   unique: 'uq_diagnosis_objections_owner_session_key',
+  // ON CONFLICT 必须用列名推断（unique 是索引名而非约束名，且 NULLS NOT DISTINCT 索引可被正确推断）
+  conflictColumns: 'user_id, guest_token, session_id, diagnosis_key',
 };

@@ -455,6 +455,8 @@ describe('RQ-226 拒绝归类留痕（P1 · 本期新增）', () => {
     assert.equal(objectionOwnerClause({}).ownerKey, null, '无身份不得构造 SQL');
     assert.equal(ownerKeyOf({ userId: null }), null, 'null userId 不可归一为 u:0');
     assert.ok(OBJECTION_SQL.unique.includes('uq_'));
+    // ON CONFLICT 必须用列名推断而非裸索引名/ON CONSTRAINT（v38 实测踩坑：42601 语法错误）
+    assert.equal(OBJECTION_SQL.conflictColumns, 'user_id, guest_token, session_id, diagnosis_key');
   });
 });
 

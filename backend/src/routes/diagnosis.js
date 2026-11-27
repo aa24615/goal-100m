@@ -43,7 +43,7 @@ router.post(
     if (!record) throw businessError('标记无效：未知诊断项 / 理由为空或超长 / 无有效身份', 400);
 
     const { rows } = await pool.query(
-      `${OBJECTION_SQL.insert} ON CONFLICT ${OBJECTION_SQL.unique} DO UPDATE SET
+      `${OBJECTION_SQL.insert} ON CONFLICT (${OBJECTION_SQL.conflictColumns}) DO UPDATE SET
          reason = EXCLUDED.reason,
          evidence_text = EXCLUDED.evidence_text,
          sample_size = EXCLUDED.sample_size,
