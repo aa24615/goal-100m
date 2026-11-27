@@ -436,6 +436,18 @@ describe('RQ-226 拒绝归类留痕（P1 · 本期新增）', () => {
     assert.equal(ded[0].reason, '新理由');
   });
 
+  it('RQ-226 · P3 · 边界异常 · DB 原始行（无 ownerKey 字段）也能正确去重与汇总（真实链路坑）', () => {
+    // GET /api/diagnosis/objections 从 DB 拿到的是原始行：只有 user_id/guest_token，没有 ownerKey。
+    // 早期实现 dedupeObjections 只认 ownerKey → 记录可查在真实链路上永远返回空（v38 冒烟抓出）。
+    const dbRow = { id: 1, user_id: null, guest_token: GUEST, session_id: null, diagnosis_key: 'worstHabit', reason: 'r', created_at: NOW.toISOString() };
+    const ded = dedupeObjections([dbRow]);
+    assert.equal(ded.length, 1, 'DB 原始行不得被过滤');
+    assert.equal(ded[0].ownerKey, `g:${GUEST}`, '应从 guest_token 推导归属');
+    const s = summarizeObjections([dbRow], { totalDiagnoses: 5 });
+    assert.equal(s.total, 1);
+    assert.equal(s.ok, true);
+  });
+
   it('RQ-226 · P4 · 性能并发 · 1000 条留痕去重稳定且归属不串号', () => {
     const rows = Array.from({ length: 1000 }, (_, i) =>
       buildObjectionRecord({ diagnosisKey: 'verdict', reason: `r${i}`, sessionId: 12 }, { userId: 7, now: NOW })

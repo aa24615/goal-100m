@@ -198,12 +198,29 @@ export function buildObjectionRecord(raw, ctx = {}) {
 export function dedupeObjections(rows = []) {
   const list = Array.isArray(rows) ? rows : [];
   const map = new Map();
-  for (const row of list) {
-    if (!row || typeof row !== 'object') continue;
-    const ok = textOf(row.ownerKey);
+  for (const rawRow of list) {
+    if (!rawRow || typeof rawRow !== 'object') continue;
+    // DB 原始行没有 ownerKey / diagnosisKey / createdAt 这些虚拟/驼峰字段，
+    // 只有 user_id / guest_token / diagnosis_key / created_at 蛇形列——
+    // 必须归一化，否则「记录可查」在真实链路上永远返回空（v38 冒烟抓出）。
+    const row = { ...rawRow };
+    let ok = textOf(row.ownerKey);
+    if (!ok) {
+      const uid = row.user_id ?? row.userId;
+      const numericUid = Number(uid);
+      if (uid != null && uid !== '' && Number.isInteger(numericUid) && numericUid > 0) ok = `u:${numericUid}`;
+      else {
+        const g = textOf(row.guest_token ?? row.guestToken);
+        ok = g ? `g:${g}` : '';
+      }
+    }
     if (!ok) continue;
-    const sid = row.sessionId == null ? 'none' : String(row.sessionId);
-    const key = `${ok}|${sid}|${textOf(row.diagnosisKey)}`;
+    row.ownerKey = ok;
+    if (!textOf(row.diagnosisKey)) row.diagnosisKey = textOf(row.diagnosis_key);
+    if (!row.createdAt) row.createdAt = row.created_at ? String(row.created_at) : '';
+    const sid = row.sessionId ?? row.session_id;
+    const sidKey = sid == null ? 'none' : String(sid);
+    const key = `${ok}|${sidKey}|${textOf(row.diagnosisKey)}`;
     const prev = map.get(key);
     if (!prev || String(row.createdAt || '') >= String(prev.createdAt || '')) map.set(key, row);
   }
