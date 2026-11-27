@@ -10,13 +10,27 @@
  *
  * 说明：截图前会注入演示账号 token 到 localStorage（键 pt_token），
  *       以便截取登录后的主界面。
+ *
+ * 探测基址（BASE）：环境变量 SHOT_BASE_URL 优先；否则从仓库根 .env 的
+ *   WEB_PORT 解析（与 docker-compose ${WEB_PORT:-8080}:80 同口径），无配置回退 8080。
+ *   2026-11-08 起本机入口改为 8866（8080 被无关服务占用），写死 8080 会截错页面。
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveShotBase } from './scripts/shotBase.js';
 
 const CDP = 'http://127.0.0.1:9222';
 const OUT = path.resolve('docs/screenshots');
-const BASE = 'http://localhost:8080';
+
+/** 仓库根 = shot.mjs 所在 backend/ 的上一级；从任意 cwd 运行都能定位 .env */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+let envText = '';
+try {
+  const envPath = path.join(REPO_ROOT, '.env');
+  if (fs.existsSync(envPath)) envText = fs.readFileSync(envPath, 'utf8');
+} catch { /* 读不到 .env 时沿用 8080 回退口径 */ }
+const BASE = resolveShotBase({ envText, explicit: process.env.SHOT_BASE_URL || null });
 const TOKEN = process.env.PT_TOKEN || '';
 
 const WIDTH = 1440;
@@ -74,6 +88,7 @@ class Session {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
+  console.log(`探测基址 BASE=${BASE}（可用 SHOT_BASE_URL 覆盖）`);
   const wsUrl = await getWsUrl();
   const ws = new WebSocket(wsUrl);
   await new Promise((res, rej) => {
